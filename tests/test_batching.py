@@ -22,7 +22,7 @@ class LinearMatrixModule(nn.Module):
         
         # The solver might pass a vector of times for quadrature in the backward pass.
         # We need to expand our matrix to match that time dimension.
-        if isinstance(t, torch.Tensor) and t.ndim == 1 and t.shape[0] > 1:
+        if isinstance(t, torch.Tensor) and t.ndim == 1:
             return A.unsqueeze(-3).expand(*self.batch_shape, t.shape[0], -1, -1)
         return A
 
