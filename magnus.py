@@ -465,7 +465,7 @@ class AdaptiveGaussKronrod(BaseQuadrature):
         c = (a + b) / 2.0
         segment_nodes = c + h * nodes
         z_eval = interp_func(segment_nodes)
-        y_eval, a_eval = z_eval.tensor_split(2, dim=-1)
+        y_eval, a_eval = z_eval[0], z_eval[1]
 
         def f_batched_for_vjp(p_dict):
             A_batch = functional_A_func(segment_nodes, p_dict)
@@ -569,7 +569,7 @@ class FixedSimpson(BaseQuadrature):
         h = (b - a) / self.N
 
         z_eval = interp_func(nodes)
-        y_eval, a_eval = z_eval.tensor_split(2, dim=-1)
+        y_eval, a_eval = z_eval[0], z_eval[1]
 
         def f_batched_for_vjp(p_dict):
             A_batch = functional_A_func(nodes, p_dict)
@@ -683,27 +683,26 @@ class _MagnusAdjoint(torch.autograd.Function):
         # Initialize the gradient dictionary
         adj_params = {k: torch.zeros_like(v) for k, v in params_req.items()}
 
-        def augmented_A_func(t_val: Union[float, Tensor], p_and_b_dict: Dict) -> Tensor:
-            """Create augmented system matrix for adjoint integration."""
+        def augmented_A_func_batched(t_val: Union[float, Tensor], p_and_b_dict: Dict) -> Tensor:
+            """
+            Creates a batch of matrices [A, -A^T] for simultaneous solving.
+            Prepends a new dimension of size 2 to the batch dimensions of A.
+            """
             A = functional_A_func(t_val, p_and_b_dict)
             A_T_neg = -A.transpose(-1, -2)
-            zeros = torch.zeros_like(A)
-            top = torch.cat([A, zeros], dim=-1)
-            bottom = torch.cat([zeros, A_T_neg], dim=-1)
-            return torch.cat([top, bottom], dim=-2)
+            return torch.stack([A, A_T_neg], dim=0)
 
-        # Backward integration through time steps
         for i in range(T - 1, 0, -1):
             t_i, t_prev = float(t[i]), float(t[i - 1])
             y_i = y_traj[..., i, :]
-            z_i = torch.cat([y_i, adj_y], dim=-1)
+            z_i = torch.stack([y_i, adj_y], dim=0) 
             
             full_p_dict_for_solve = {**params_req, **buffers_dict}
             
             with torch.no_grad():
                 dense_output_solver = magnus_solve(
                     z_i, (t_i, t_prev), 
-                    lambda t_val, p: augmented_A_func(t_val, p), full_p_dict_for_solve,
+                    lambda t_val, p: augmented_A_func_batched(t_val, p), full_p_dict_for_solve,
                     order=order, rtol=rtol, atol=atol, dense_output=True
                 )
 
@@ -723,7 +722,7 @@ class _MagnusAdjoint(torch.autograd.Function):
                 adj_params[k].sub_(integral_val_dict[k])
 
             z_prev = dense_output_solver(torch.tensor([t_prev], device=z_i.device, dtype=z_i.dtype)).squeeze(-2)
-            adj_y = z_prev.narrow(-1, dim, dim).clone()
+            adj_y = z_prev[1].clone()
             adj_y.add_(grad_y_traj[..., i-1, :])
 
         grad_y0 = adj_y if ctx.y0_requires_grad else None
