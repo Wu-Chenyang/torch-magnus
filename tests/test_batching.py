@@ -1,7 +1,30 @@
 import torch
+import torch.nn as nn
 import unittest
 import math
-from magnus import magnus_odeint, magnus_odeint_adjoint, magnus_solve
+from torch_magnus import magnus_odeint, magnus_odeint_adjoint, magnus_solve
+
+class LinearMatrixModule(nn.Module):
+    """A simple nn.Module that defines a time-independent linear system."""
+    def __init__(self, dim: int, batch_shape: tuple = ()):
+        super().__init__()
+        self.dim = dim
+        self.batch_shape = batch_shape
+        # Learnable parameter for the off-diagonal element
+        self.omega = nn.Parameter(torch.randn(*batch_shape, 1))
+
+    def forward(self, t):
+        # Build the matrix A = [[0, w], [-w, 0]]
+        # This module ignores t, creating a time-independent system.
+        A = torch.zeros(*self.batch_shape, self.dim, self.dim, device=self.omega.device, dtype=self.omega.dtype)
+        A[..., 0, 1] = self.omega.squeeze(-1)
+        A[..., 1, 0] = -self.omega.squeeze(-1)
+        
+        # The solver might pass a vector of times for quadrature in the backward pass.
+        # We need to expand our matrix to match that time dimension.
+        if isinstance(t, torch.Tensor) and t.ndim == 1 and t.shape[0] > 1:
+            return A.unsqueeze(-3).expand(*self.batch_shape, t.shape[0], -1, -1)
+        return A
 
 class TestMagnusSolver(unittest.TestCase):
 
@@ -37,7 +60,7 @@ class TestMagnusSolver(unittest.TestCase):
         dim = 2
         batch_shape = (2,) # Example batch shape
         y0 = torch.tensor([1.0, 0.0]).unsqueeze(0).expand(*batch_shape, -1) 
-        t_span = torch.linspace(0, 2 * math.pi, 500)
+        t_span = torch.linspace(0, 2 * math.pi, 100)
         
         A_base = torch.tensor([[0., 1.], [-1., 0.]])
         def A_func(t, params=None):
@@ -172,6 +195,59 @@ class TestMagnusSolver(unittest.TestCase):
         print(f"Steps (batch solve): {steps_batch}")
         print(f"Steps (individual solve): {total_steps_individual}")
         self.assertTrue(steps_batch <= total_steps_individual)
+
+    def test_nn_module_optimization(self):
+        """Test optimization of a system defined by an nn.Module."""
+        dim = 2
+        batch_shape = (4,) # A batch of 4 systems
+        dtype = torch.float64
+
+        # 1. Generate target data from a module with known parameters
+        true_omega = torch.tensor([1.5, -0.5, 2.0, 0.8], dtype=dtype).view(batch_shape[0], 1)
+        target_module = LinearMatrixModule(dim, batch_shape).to(dtype)
+        with torch.no_grad():
+            target_module.omega.copy_(true_omega)
+        
+        y0 = torch.randn(*batch_shape, dim, dtype=dtype)
+        t_span = torch.linspace(0, math.pi, 10, dtype=dtype)
+
+        with torch.no_grad():
+            y_target = magnus_odeint(target_module, y0, t_span)
+
+        # 2. Create a learnable module
+        learnable_module = LinearMatrixModule(dim, batch_shape).to(dtype)
+        with torch.no_grad():
+            learnable_module.omega.fill_(0.1)
+
+        # 3. Optimize the learnable module's parameters
+        optimizer = torch.optim.Adam(learnable_module.parameters(), lr=0.1)
+        
+        print("\nTesting nn.Module optimization...")
+        
+        # First step
+        optimizer.zero_grad()
+        y_pred_initial = magnus_odeint_adjoint(learnable_module, y0, t_span)
+        loss_initial = torch.mean((y_pred_initial - y_target)**2)
+        loss_initial.backward()
+        optimizer.step()
+        
+        # Check that gradients were computed
+        self.assertIsNotNone(learnable_module.omega.grad)
+        print(f"Iter 000 | Loss: {loss_initial.item():.6f}")
+
+        # Run a few more steps
+        for i in range(1, 10):
+            optimizer.zero_grad()
+            y_pred = magnus_odeint_adjoint(learnable_module, y0, t_span)
+            loss = torch.mean((y_pred - y_target)**2)
+            loss.backward()
+            optimizer.step()
+
+        print(f"Iter 009 | Loss: {loss.item():.6f}")
+
+        # 4. Check that the loss has decreased, proving optimization is working.
+        self.assertLess(loss.item(), loss_initial.item())
+        print("Optimization test passed: Gradients are present and loss is decreasing.")
 
 if __name__ == '__main__':
     unittest.main()

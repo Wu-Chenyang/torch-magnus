@@ -1,4 +1,4 @@
-from magnus import magnus_odeint, magnus_odeint_adjoint, magnus_solve
+from torch_magnus import magnus_odeint, magnus_odeint_adjoint, magnus_solve
 
 import torch
 import math
@@ -95,7 +95,7 @@ def test_exponential_system():
     success = grad_error < 1e-8 + 1e-6 * torch.norm(grad_analytical)
     print(f"  Test: {'PASSED' if success else 'FAILED'}")
     
-    return success
+    assert success
 
 
 def test_harmonic_oscillator():
@@ -162,7 +162,7 @@ def test_harmonic_oscillator():
     success = grad_error < 1e-8 + 1e-6 * abs(grad_analytical)
     print(f"  Test: {'PASSED' if success else 'FAILED'}")
     
-    return success
+    assert success
 
 
 def test_rotation_matrix():
@@ -213,7 +213,7 @@ def test_rotation_matrix():
     success = grad_error < 1e-8 + 1e-6 * abs(grad_analytical)
     print(f"  Test: {'PASSED' if success else 'FAILED'}")
     
-    return success
+    assert success
 
 
 def test_challenging_highly_oscillatory_system():
@@ -290,7 +290,7 @@ def test_challenging_highly_oscillatory_system():
     success = grad_error < 1e-8 + 1e-6 * torch.norm(grad_analytical).item()
     print(f"  Test: {'PASSED' if success else 'FAILED'}")
     
-    return success
+    assert success
 
 
 def test_against_torchdiffeq():
@@ -343,11 +343,11 @@ def test_against_torchdiffeq():
         success = sol_error < 1e-8 + torch.norm(y_torchdiffeq[-1]).item() * 1e-6 and grad_error < 1e-8 + torch.norm(grad_torchdiffeq).item() * 1e-6
         print(f"  Comparison: {'PASSED' if success else 'FAILED'}")
         
-        return success
+        assert success
         
     except ImportError:
         print("  torchdiffeq not available, skipping comparison")
-        return True
+        assert True
 
 
 def test_complex_system_stability():
@@ -390,12 +390,10 @@ def test_complex_system_stability():
             else:
                 print(f"    Order {order}: PASSED")
                 success = True
-                
+            assert success
         except Exception as e:
             print(f"    Order {order}: FAILED ({str(e)})")
-            success = False
-    
-    return success
+            assert False
 
 
 def test_order_consistency():
@@ -438,7 +436,7 @@ def test_order_consistency():
         print(f"  {n_steps:9d} | {sol_diff.item():11.2e} | {grad_diff.item():11.2e}")
     
     print("  Note: Differences should decrease with more time steps")
-    return True
+    assert True
 
 
 def run_comprehensive_gradient_tests():
@@ -527,7 +525,7 @@ def test_tolerance_settings():
     print(f"  - Does final error meet the tolerance for all cases? {'YES' if all(r['passed'] for r in results) else 'NO'}")
 
     print(f"\n  Overall Tolerance Test Result: {'PASSED' if all_passed else 'FAILED'}")
-    return all_passed
+    assert all_passed
 
 
 if __name__ == "__main__":
