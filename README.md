@@ -1,4 +1,4 @@
-# torch_magnus
+# torch-magnus
 
 [![PyPI version](https://badge.fury.io/py/torch-magnus.svg)](https://badge.fury.io/py/torch-magnus)
 [![Tests](https://github.com/Wu-Chenyang/torch_magnus/actions/workflows/ci.yml/badge.svg)](https://github.com/Wu-Chenyang/torch_magnus/actions/workflows/ci.yml)
@@ -22,7 +22,7 @@ This library is particularly well-suited for problems in quantum mechanics, cont
 You can install the package directly from PyPI (once published):
 
 ```bash
-pip install torch_magnus
+pip install torch-magnus
 ```
 
 Or, for development, clone this repository and install in editable mode. **Note**: Use quotes around `.[dev]` to prevent shell expansion issues.
