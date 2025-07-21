@@ -4,7 +4,7 @@
 [![Tests](https://github.com/Wu-Chenyang/torch-magnus/actions/workflows/ci.yml/badge.svg)](https://github.com/Wu-Chenyang/torch-magnus/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-`torch_magnus` is a specialized PyTorch-based library for the efficient **batch solving of homogeneous linear ordinary differential equations (ODEs)** of the form `dy/dt = A(t)y`. It leverages Magnus-type integrators to provide high-precision, differentiable, and GPU-accelerated solutions.
+`torch-magnus` is a specialized PyTorch-based library for the efficient **batch solving of homogeneous linear ordinary differential equations (ODEs)** of the form `dy/dt = A(t)y`. It leverages Magnus-type integrators to provide high-precision, differentiable, and GPU-accelerated solutions.
 
 This library is particularly well-suited for problems in quantum mechanics, control theory, and other areas of physics and engineering where such ODEs are common.
 
@@ -28,8 +28,8 @@ pip install torch-magnus
 Or, for development, clone this repository and install in editable mode. **Note**: Use quotes around `.[dev]` to prevent shell expansion issues.
 
 ```bash
-git clone https://github.com/Wu-Chenyang/torch_magnus.git
-cd torch_magnus
+git clone https://github.com/Wu-Chenyang/torch-magnus.git
+cd torch-magnus
 pip install -e ".[dev]"
 ```
 
@@ -77,7 +77,7 @@ We will solve a batch of `(2, 3)` simple harmonic oscillators, each with a diffe
 ```python
 import torch
 import torch.nn as nn
-from torch_magnus import magnus_odeint, magnus_odeint_adjoint
+from torch-magnus import magnus_odeint, magnus_odeint_adjoint
 
 # 1. Define the problem for a batch of systems
 dim = 2

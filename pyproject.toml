@@ -30,5 +30,5 @@ dev = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/Wu-Chenyang/torch_magnus"
-"Bug Tracker" = "https://github.com/Wu-Chenyang/torch_magnus/issues"
+"Homepage" = "https://github.com/Wu-Chenyang/torch-magnus"
+"Bug Tracker" = "https://github.com/Wu-Chenyang/torch-magnus/issues"
