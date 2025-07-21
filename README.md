@@ -1,7 +1,7 @@
 # torch-magnus
 
 [![PyPI version](https://badge.fury.io/py/torch-magnus.svg)](https://badge.fury.io/py/torch-magnus)
-[![Tests](https://github.com/Wu-Chenyang/torch_magnus/actions/workflows/ci.yml/badge.svg)](https://github.com/Wu-Chenyang/torch_magnus/actions/workflows/ci.yml)
+[![Tests](https://github.com/Wu-Chenyang/torch-magnus/actions/workflows/ci.yml/badge.svg)](https://github.com/Wu-Chenyang/torch-magnus/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 `torch_magnus` is a specialized PyTorch-based library for the efficient **batch solving of homogeneous linear ordinary differential equations (ODEs)** of the form `dy/dt = A(t)y`. It leverages Magnus-type integrators to provide high-precision, differentiable, and GPU-accelerated solutions.
