@@ -151,7 +151,7 @@ class TestMagnusSolver(unittest.TestCase):
             else:
                 raise ValueError(f"Unsupported time shape: {t.shape}")
 
-        traj_batch, _ = magnus_solve(y0_batch, t_span_solve, A_func_batch, order=4, return_traj=True)
+        traj_batch, _ = magnus_solve(y0_batch, t_span_solve, A_func_batch, {}, order=4, return_traj=True)
         steps_batch = len(traj_batch)
 
         total_steps_individual = 0
@@ -166,7 +166,7 @@ class TestMagnusSolver(unittest.TestCase):
                 else:
                     raise ValueError(f"Unsupported time shape: {t.shape}")
             
-            traj_individual, _ = magnus_solve(y0_individual, t_span_solve, A_func_individual, order=4, return_traj=True)
+            traj_individual, _ = magnus_solve(y0_individual, t_span_solve, A_func_individual, {}, order=4, return_traj=True)
             total_steps_individual += len(traj_individual)
 
         print(f"Steps (batch solve): {steps_batch}")

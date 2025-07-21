@@ -495,12 +495,12 @@ def test_tolerance_settings():
     print("  " + "-" * 60)
 
     for tol in tolerances:
-        # 3. 使用 magnus_solve 进行求解
-        y_final = magnus_solve(
-            y0, t_span, A_func,
-            rtol=tol, atol=tol, # 设置求解器的容差
+        # 3. 使用 magnus_odeint 进行求解
+        y_final = magnus_odeint(
+            A_func, y0, t_span, 
+            rtol=10*tol, atol=tol, # 设置求解器的容差
             order=4  # 使用4阶方法
-        )
+        )[..., -1, :]
 
         # 4. 计算与解析解的误差
         y_analytical_final = analytical_solution(T)
