@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "torch-magnus"
 version = "0.1.0"
 authors = [
-  { name="Wu-Chenyang", email="wuchenyang@lamda.nju.edu.cn" },
+  { name="Wu-Chenyang", email="wuchenyang@stu.pku.edu.cn" },
 ]
 description = "A PyTorch-based library for batch solving homogeneous linear matrix ODEs with Magnus integrators."
 readme = "README.md"
@@ -23,12 +23,12 @@ dependencies = [
     "torch>=1.13",
 ]
 
-[options.extras_require]
+[project.optional-dependencies]
 dev = [
     "pytest",
     "matplotlib",
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/Wu-Chenyang/torch-magnus"
-"Bug Tracker" = "https://github.com/Wu-Chenyang/torch-magnus/issues"
+"Homepage" = "https://github.com/Wu-Chenyang/torch_magnus"
+"Bug Tracker" = "https://github.com/Wu-Chenyang/torch_magnus/issues"
