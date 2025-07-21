@@ -57,7 +57,7 @@ def test_interpolation_accuracy(order, rtol):
     t_eval = torch.linspace(t_span.min(), t_span.max(), 100, dtype=torch.float64)
 
     # Get interpolated and analytical solutions
-    y_interpolated = solution.evaluate(t_eval)
+    y_interpolated = solution(t_eval)
     y_analytical = analytical_solution(t_eval)
 
     # Calculate the maximum interpolation error

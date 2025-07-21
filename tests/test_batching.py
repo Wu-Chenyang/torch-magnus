@@ -41,8 +41,8 @@ class TestMagnusSolver(unittest.TestCase):
             if isinstance(t, float) or t.ndim == 0:
                 return A_base_dev * torch.sin(torch.tensor(t))
             elif t.ndim == 1:
-                sin_t = torch.sin(t).view(1, -1, 1, 1)
-                return A_base_dev.unsqueeze(1) * sin_t
+                sin_t = torch.sin(t).view(-1, 1, 1)
+                return A_base_dev.unsqueeze(-3) * sin_t
             else:
                 raise ValueError(f"Unsupported time shape: {t.shape}")
 

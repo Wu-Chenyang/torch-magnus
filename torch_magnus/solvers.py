@@ -251,10 +251,6 @@ class DenseOutput:
         
         return y_interp
 
-    def evaluate(self, t_batch: Tensor) -> Tensor:
-        """Alias for __call__ for a more descriptive API."""
-        return self(t_batch)
-
 # -----------------------------------------------------------------------------
 # ODE Solver Interface
 # -----------------------------------------------------------------------------
@@ -352,44 +348,10 @@ def magnus_solve(
         return ys, ts
 
     if dense_output:
-        # if not steps_data:
-        #     # Handle case where the interval is completed in one go
-        #     steps_data.append((t0, t1 - t0, y0.detach()))
         ys, ts = torch.stack(ys, dim=-2), torch.tensor(ts)
         return DenseOutput(ys, ts, order, A_func_bound)
     
     return y
-
-
-def _magnus_odeint_core(
-    functional_A_func: Callable, p_dict: Dict, 
-    y0: Tensor, t_vec: Tensor,
-    order: int, rtol: float, atol: float
-) -> Tensor:
-    """
-    Internal integration loop without input preparation.
-    
-    Args:
-        functional_A_func: Matrix function A(t, params)
-        p_dict: Parameter dictionary
-        y0: Initial conditions of shape (*batch_shape, dim)
-        t_vec: Time points of shape (N,)
-        order: Magnus integrator order
-        rtol: Relative tolerance
-        atol: Absolute tolerance
-        
-    Returns:
-        Solution trajectory of shape (*batch_shape, N, dim)
-    """
-    ys_out = [y0]
-    y_curr = y0
-    for i in range(len(t_vec) - 1):
-        t0, t1 = float(t_vec[i]), float(t_vec[i + 1])
-        y_next = magnus_solve(y_curr, (t0, t1), functional_A_func, p_dict, order, rtol, atol)
-        ys_out.append(y_next)
-        y_curr = y_next
-    return torch.stack(ys_out, dim=-2)
-
 
 def magnus_odeint(
     A_func_or_module: Union[Callable, nn.Module], y0: Tensor, t: Union[Sequence[float], torch.Tensor],
@@ -428,7 +390,14 @@ def magnus_odeint(
             order, rtol, atol, dense_output=True
         )
     else:
-        return _magnus_odeint_core(functional_A_func, p_dict, y0, t_vec, order, rtol, atol)
+        ys_out = [y0]
+        y_curr = y0
+        for i in range(len(t_vec) - 1):
+            t0, t1 = float(t_vec[i]), float(t_vec[i + 1])
+            y_next = magnus_solve(y_curr, (t0, t1), functional_A_func, p_dict, order, rtol, atol)
+            ys_out.append(y_next)
+            y_curr = y_next
+        return torch.stack(ys_out, dim=-2)
 
 # -----------------------------------------------------------------------------
 # Modular Integration Backends
@@ -483,31 +452,30 @@ class AdaptiveGaussKronrod(BaseQuadrature):
         cls._rule_cache[(dtype, device)] = rule
         return rule
 
-    def _eval_segment(self, interp_func, functional_A_func, a, b, params_req, nodes, weights_k, weights_g):
+    def _eval_segment(self, y_interp_func, a_interp_func, functional_A_func, a, b, params_req, nodes, weights_k, weights_g):
         """Evaluate integral over a single segment using Gauss-Kronrod rule."""
         h = (b - a) / 2.0
         c = (a + b) / 2.0
         segment_nodes = c + h * nodes
-        z_eval = interp_func(segment_nodes)
-        y_eval, a_eval = z_eval[0], z_eval[1]
+        y_eval = y_interp_func(segment_nodes)
+        a_eval = a_interp_func(segment_nodes)
 
         def f_batched_for_vjp(p_dict):
             A_batch = functional_A_func(segment_nodes, p_dict)
             return _apply_matrix(A_batch, y_eval)
 
-        with torch.enable_grad():
-            _, vjp_fn = torch.func.vjp(f_batched_for_vjp, params_req)
-            cotangent_K = h * weights_k * a_eval
-            cotangent_G = h * weights_g * a_eval
-            I_K = vjp_fn(cotangent_K)[0]
-            I_G = vjp_fn(cotangent_G)[0]
+        _, vjp_fn = torch.func.vjp(f_batched_for_vjp, params_req)
+        cotangent_K = h * weights_k * a_eval
+        cotangent_G = h * weights_g * a_eval
+        I_K = vjp_fn(cotangent_K)[0]
+        I_G = vjp_fn(cotangent_G)[0]
         
         # Calculate error for dictionary structure
         diff_dict = {k: I_K[k] - I_G[k] for k in I_K}
         error = torch.sqrt(sum(torch.norm(v)**2 for v in diff_dict.values()))
         return I_K, error
 
-    def forward(self, interp_func: Callable, functional_A_func: Callable, a: float, b: float, atol: float, rtol: float, params_req: Dict[str, Tensor], max_segments: int = 100) -> Dict[str, Tensor]:
+    def forward(self, y_interp_func: Callable, a_interp_func: Callable, functional_A_func: Callable, a: float, b: float, atol: float, rtol: float, params_req: Dict[str, Tensor], max_segments: int = 100) -> Dict[str, Tensor]:
         """
         Adaptive Gauss-Kronrod integration with error control.
         
@@ -525,7 +493,7 @@ class AdaptiveGaussKronrod(BaseQuadrature):
         I_total = {k: torch.zeros_like(v) for k, v in params_req.items()}
         E_total = torch.tensor(0.0, dtype=ref_param.dtype, device=ref_param.device)
         
-        I_K, error = self._eval_segment(interp_func, functional_A_func, a, b, params_req, nodes, weights_k, weights_g)
+        I_K, error = self._eval_segment(y_interp_func, a_interp_func, functional_A_func, a, b, params_req, nodes, weights_k, weights_g)
         heap = [(-error.item(), a, b, I_K, error)]
 
         # Dictionary accumulation
@@ -555,8 +523,8 @@ class AdaptiveGaussKronrod(BaseQuadrature):
                 warnings.warn(f"Interval {b_parent - a_parent} too small to subdivide further.")
                 continue
 
-            I_K_left, err_left = self._eval_segment(interp_func, functional_A_func, a_parent, mid, params_req, nodes, weights_k, weights_g)
-            I_K_right, err_right = self._eval_segment(interp_func, functional_A_func, mid, b_parent, params_req, nodes, weights_k, weights_g)
+            I_K_left, err_left = self._eval_segment(y_interp_func, a_interp_func, functional_A_func, a_parent, mid, params_req, nodes, weights_k, weights_g)
+            I_K_right, err_right = self._eval_segment(y_interp_func, a_interp_func, functional_A_func, mid, b_parent, params_req, nodes, weights_k, weights_g)
 
             heapq.heappush(heap, (-err_left.item(), a_parent, mid, I_K_left, err_left))
             heapq.heappush(heap, (-err_right.item(), mid, b_parent, I_K_right, err_right))
@@ -583,7 +551,7 @@ class FixedSimpson(BaseQuadrature):
             N += 1
         self.N = N
 
-    def forward(self, interp_func: Callable, functional_A_func: Callable, a: float, b: float, atol: float, rtol: float, params_req: Dict[str, Tensor]) -> Dict[str, Tensor]:
+    def forward(self, y_interp_func: Callable, a_interp_func: Callable, functional_A_func: Callable, a: float, b: float, atol: float, rtol: float, params_req: Dict[str, Tensor]) -> Dict[str, Tensor]:
         """Fixed-step Simpson integration."""
         if a == b:
             return {k: torch.zeros_like(v) for k, v in params_req.items()}
@@ -592,8 +560,8 @@ class FixedSimpson(BaseQuadrature):
         nodes = torch.linspace(a, b, self.N + 1, device=ref_param.device, dtype=ref_param.dtype)
         h = (b - a) / self.N
 
-        z_eval = interp_func(nodes)
-        y_eval, a_eval = z_eval[0], z_eval[1]
+        y_eval = y_interp_func(nodes)
+        a_eval = a_interp_func(nodes)
 
         def f_batched_for_vjp(p_dict):
             A_batch = functional_A_func(nodes, p_dict)
@@ -644,12 +612,11 @@ class _MagnusAdjoint(torch.autograd.Function):
         
         t = t.to(y0.dtype)
         with torch.no_grad():
-            # Call the core integration loop
-            y_traj = _magnus_odeint_core(
-                functional_A_func, 
-                params_and_buffers_dict,
-                y0, t, order, rtol, atol
+            y_dense_traj = magnus_solve(
+                y0, (t[0], t[-1]), functional_A_func, params_and_buffers_dict, 
+                order, rtol, atol, dense_output=True
             )
+            y_traj = y_dense_traj(t)
 
         # Save context for the backward pass
         ctx.functional_A_func = functional_A_func
@@ -657,9 +624,10 @@ class _MagnusAdjoint(torch.autograd.Function):
         ctx.order, ctx.rtol, ctx.atol = order, rtol, atol
         ctx.quad_method, ctx.quad_options = quad_method, quad_options
         ctx.y0_requires_grad = y0.requires_grad
+        ctx.y_dense_traj = y_dense_traj
         
         # Save all tensors that might be needed for gradient computation
-        ctx.save_for_backward(t, y_traj, *param_values)
+        ctx.save_for_backward(t, *param_values)
         
         return y_traj
 
@@ -676,8 +644,9 @@ class _MagnusAdjoint(torch.autograd.Function):
         """
         # Unpack saved tensors
         saved_tensors = ctx.saved_tensors
-        t, y_traj = saved_tensors[0], saved_tensors[1]
-        param_values = saved_tensors[2:]
+        y_dense_traj = ctx.y_dense_traj
+        t = saved_tensors[0]
+        param_values = saved_tensors[1:]
         
         # Unpack non-tensor context
         functional_A_func = ctx.functional_A_func
@@ -702,32 +671,26 @@ class _MagnusAdjoint(torch.autograd.Function):
         else:
             raise ValueError(f"Unknown quadrature method: {quad_method}")
 
-        T, dim = y_traj.shape[-2], y_traj.shape[-1]
+        T, dim = grad_y_traj.shape[-2], grad_y_traj.shape[-1]
         adj_y = grad_y_traj[..., -1, :].clone()
         # Initialize the gradient dictionary
         adj_params = {k: torch.zeros_like(v) for k, v in params_req.items()}
 
-        def augmented_A_func_batched(t_val: Union[float, Tensor], p_and_b_dict: Dict) -> Tensor:
+        full_p_dict_for_solve = {**params_req, **buffers_dict}
+        def neg_trans_A_func(t_val: Union[float, Tensor], p_and_b_dict: Dict) -> Tensor:
             """
-            Creates a batch of matrices [A, -A^T] for simultaneous solving.
-            Prepends a new dimension of size 2 to the batch dimensions of A.
+            Creates a batch of matrices [-A^T] for solving.
             """
             A = functional_A_func(t_val, p_and_b_dict)
-            A_T_neg = -A.transpose(-1, -2)
-            return torch.stack([A, A_T_neg], dim=0)
-
+            return -A.transpose(-1, -2)
+        
         for i in range(T - 1, 0, -1):
             t_i, t_prev = float(t[i]), float(t[i - 1])
-            y_i = y_traj[..., i, :]
-            z_i = torch.stack([y_i, adj_y], dim=0) 
-            
-            full_p_dict_for_solve = {**params_req, **buffers_dict}
-            
+
             with torch.no_grad():
-                dense_output_solver = magnus_solve(
-                    z_i, (t_i, t_prev), 
-                    lambda t_val, p: augmented_A_func_batched(t_val, p), full_p_dict_for_solve,
-                    order=order, rtol=rtol, atol=atol, dense_output=True
+                a_dense_traj = magnus_solve(
+                    adj_y, (t_i, t_prev), neg_trans_A_func, full_p_dict_for_solve, 
+                    order, rtol, atol, dense_output=True
                 )
 
             def A_func_for_quadrature(t_val, p_dict_req):
@@ -738,15 +701,14 @@ class _MagnusAdjoint(torch.autograd.Function):
             quad_rtol = rtol * 0.1
             
             integral_val_dict = quad_integrator(
-                dense_output_solver, A_func_for_quadrature, 
+                y_dense_traj, a_dense_traj, A_func_for_quadrature, 
                 t_i, t_prev, quad_atol, quad_rtol, params_req=params_req
             )
             
             for k in adj_params:
                 adj_params[k].sub_(integral_val_dict[k])
 
-            z_prev = dense_output_solver(torch.as_tensor(t_prev, device=z_i.device, dtype=z_i.dtype)).squeeze(-2)
-            adj_y = z_prev[1].clone()
+            adj_y = a_dense_traj(t[i-1])
             adj_y.add_(grad_y_traj[..., i-1, :])
 
         grad_y0 = adj_y if ctx.y0_requires_grad else None
