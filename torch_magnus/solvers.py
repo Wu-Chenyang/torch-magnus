@@ -187,6 +187,46 @@ class Magnus4th(BaseMagnus):
         
         return y_next
 
+class Magnus6th(BaseMagnus):
+    """Sixth-order Magnus integrator using three-point Gauss quadrature."""
+    order = 6
+    _sqrt15 = math.sqrt(15.0)
+    _c1, _c2, _c3 = 0.5 - _sqrt15 / 10, 0.5, 0.5 + _sqrt15 / 10
+
+    def forward(self, A: Callable[..., Tensor], t0: Union[Sequence[float], torch.Tensor, float], h: Union[Sequence[float], torch.Tensor, float], y0: Tensor) -> Tensor:
+        """
+        Sixth-order Magnus step with an optimized number of commutators.
+        
+        Args:
+            A: Matrix function returning (..., *batch_shape, dim, dim)
+            t0: Initial time
+            h: Step size
+            y0: Initial state of shape (..., *batch_shape, dim)
+            
+        Returns:
+            y_next: Next state of shape (..., *batch_shape, dim)
+        """
+        t1, t2, t3 = t0 + self._c1 * h, t0 + self._c2 * h, t0 + self._c3 * h
+        h_tensor = torch.as_tensor(h).unsqueeze(-1).unsqueeze(-1)
+
+        A1 = A(t1)
+        A2 = A(t2)
+        A3 = A(t3)
+
+        alpha1 = h_tensor * A2
+        alpha2 = h_tensor * self._sqrt15 / 3.0 * (A3 - A1)
+        alpha3 = h_tensor * 10.0 / 3.0 * (A1 - 2 * A2 + A3)
+
+        C1 = _commutator(alpha1, alpha2)
+        C2 = -1/60 * _commutator(alpha1, 2 * alpha3 + C1)
+        
+        Omega = alpha1 + alpha3/12 + (1/240)*_commutator(-20*alpha1 - alpha3 + C1, alpha2 + C2)
+
+        U = _matrix_exp(Omega)
+        y_next = _apply_matrix(U, y0)
+        
+        return y_next
+
 # -----------------------------------------------------------------------------
 # Dense Output (Continuous Extension)
 # -----------------------------------------------------------------------------
@@ -219,6 +259,8 @@ class DenseOutput:
             self.integrator = Magnus2nd()
         elif self.order == 4:
             self.integrator = Magnus4th()
+        elif self.order == 6:
+            self.integrator = Magnus6th()
         else:
             raise ValueError(f"Invalid order: {order}")
 
@@ -272,7 +314,7 @@ def magnus_solve(
         t_span: Integration interval (t0, t1)
         functional_A_func: Matrix function A(t, params) returning (*batch_shape, *time_shape, dim, dim)
         p_dict: Parameter dictionary
-        order: Magnus integrator order (2 or 4)
+        order: Magnus integrator order (2, 4, or 6)
         rtol: Relative tolerance for adaptive stepping
         atol: Absolute tolerance for adaptive stepping
         return_traj: If True, return trajectory at all time steps
@@ -287,7 +329,8 @@ def magnus_solve(
     """
     if order == 2: integrator = Magnus2nd()
     elif order == 4: integrator = Magnus4th()
-    else: raise ValueError("order must be 2 or 4")
+    elif order == 6: integrator = Magnus6th()
+    else: raise ValueError("order must be 2, 4, or 6")
 
     t0, t1 = float(t_span[0]), float(t_span[1])
     if t0 == t1:
@@ -368,7 +411,7 @@ def magnus_odeint(
         t: Time points of shape (N,). If dense_output is True, only the first and
            last time points are used to define the integration interval.
         params: Parameter tensor (for callable interface) or None
-        order: Magnus integrator order (2 or 4)
+        order: Magnus integrator order (2, 4, or 6)
         rtol: Relative tolerance
         atol: Absolute tolerance
         dense_output: If True, return a `DenseOutput` object for interpolation.
@@ -752,7 +795,7 @@ def magnus_odeint_adjoint(
         y0: Initial conditions of shape (*batch_shape, dim)
         t: Time points of shape (N,)
         params: Parameter tensor (for callable interface) or None
-        order: Magnus integrator order (2 or 4)
+        order: Magnus integrator order (2, 4, or 6)
         rtol: Relative tolerance for integration
         atol: Absolute tolerance for integration
         quad_method: Quadrature method for adjoint integration ('gk' or 'simpson')

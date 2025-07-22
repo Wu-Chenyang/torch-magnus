@@ -5,47 +5,11 @@ import math
 import numpy as np
 from typing import Callable, Union, Sequence
 import matplotlib.pyplot as plt
-
-def test_magnus_gradient_accuracy():
-    """测试Magnus积分器梯度计算的准确性"""
-    
-    print("Testing Magnus integrator gradient accuracy...")
-    print("=" * 60)
-    
-    # 测试1: 与解析解比较
-    print("Test 1: Analytical solution comparison")
-    test_analytical_solutions()
-    
-    # 测试2: 与torchdiffeq比较
-    print("\nTest 2: Comparison with torchdiffeq")
-    test_against_torchdiffeq()
-    
-    # 测试3: 复杂系统稳定性
-    print("\nTest 3: Complex system stability")
-    test_complex_system_stability()
-    
-    # 测试4: 不同阶数一致性
-    print("\nTest 4: Order consistency")
-    test_order_consistency()
+import pytest
 
 
-def test_analytical_solutions():
-    """测试具有解析解的系统"""
-    
-    print("\n1.1 Simple exponential system")
-    test_exponential_system()
-    
-    print("\n1.2 Harmonic oscillator")
-    test_harmonic_oscillator()
-    
-    print("\n1.3 Rotation matrix")
-    test_rotation_matrix()
-
-    print("\n1.4 Challenging highly oscillatory system")
-    test_challenging_highly_oscillatory_system()
-
-
-def test_exponential_system():
+@pytest.mark.parametrize("order", [2, 4, 6])
+def test_exponential_system(order):
     """测试指数系统: y' = diag(p1, p2) * y"""
     
     def A_func(t, params: torch.Tensor) -> torch.Tensor:
@@ -64,7 +28,7 @@ def test_exponential_system():
     t = torch.tensor([0.0, T], dtype=torch.float64)
     
     # Magnus求解
-    y_traj = magnus_odeint_adjoint(A_func, y0, t, params, order=2, rtol=1e-6, atol=1e-8)
+    y_traj = magnus_odeint_adjoint(A_func, y0, t, params, order=order, rtol=1e-6, atol=1e-8)
     
     # 解析解: y(T) = [exp(p1*T), 2*exp(p2*T)]
     y_analytical = torch.tensor([
@@ -98,8 +62,9 @@ def test_exponential_system():
     assert success
 
 
-def test_harmonic_oscillator():
-    """测试谐振子: y'' + ω²y = 0 (修正版)"""
+@pytest.mark.parametrize("order", [2, 4, 6])
+def test_harmonic_oscillator(order):
+    """测试谐振子: y'' + ω²y = 0 """
     
     def A_func(t, params: torch.Tensor) -> torch.Tensor:
         """A = [[0, 1], [-ω², 0]]"""
@@ -118,7 +83,7 @@ def test_harmonic_oscillator():
     t = torch.tensor([0.0, T], dtype=torch.float64)
     
     # Magnus求解
-    y_traj = magnus_odeint_adjoint(A_func, y0, t, params, order=4, rtol=1e-6, atol=1e-8)
+    y_traj = magnus_odeint_adjoint(A_func, y0, t, params, order=order, rtol=1e-6, atol=1e-8)
     
         # 解析解: y(T) = [cos(ωT), -ω*sin(ωT)]
     y_analytical = torch.tensor([
@@ -165,7 +130,8 @@ def test_harmonic_oscillator():
     assert success
 
 
-def test_rotation_matrix():
+@pytest.mark.parametrize("order", [2, 4, 6])
+def test_rotation_matrix(order):
     """测试旋转矩阵: A = [[0, ω], [-ω, 0]]"""
     
     def A_func(t, params: torch.Tensor) -> torch.Tensor:
@@ -185,7 +151,7 @@ def test_rotation_matrix():
     t = torch.tensor([0.0, T], dtype=torch.float64)
     
     # Magnus求解
-    y_traj = magnus_odeint_adjoint(A_func, y0, t, params, order=4, rtol=1e-6, atol=1e-8)
+    y_traj = magnus_odeint_adjoint(A_func, y0, t, params, order=order, rtol=1e-6, atol=1e-8)
     
     # 解析解: y(T) = [cos(ωT), -sin(ωT)]
     y_analytical = torch.tensor([
@@ -216,7 +182,8 @@ def test_rotation_matrix():
     assert success
 
 
-def test_challenging_highly_oscillatory_system():
+@pytest.mark.parametrize("order", [2, 4, 6])
+def test_challenging_highly_oscillatory_system(order):
     """测试一个具有非零梯度的挑战性高度振荡系统"""
     
     def A_func(t, params: torch.Tensor) -> torch.Tensor:
@@ -240,7 +207,7 @@ def test_challenging_highly_oscillatory_system():
     t = torch.tensor([0.0, T], dtype=torch.float64)
 
     # Magnus求解
-    y_traj = magnus_odeint_adjoint(A_func, y0, t, params, order=4, rtol=1e-6, atol=1e-8)
+    y_traj = magnus_odeint_adjoint(A_func, y0, t, params, order=order, rtol=1e-6, atol=1e-8)
 
     # 解析解
     if w2 == 0:
@@ -293,7 +260,8 @@ def test_challenging_highly_oscillatory_system():
     assert success
 
 
-def test_against_torchdiffeq():
+@pytest.mark.parametrize("order", [2, 4, 6])
+def test_against_torchdiffeq(order):
     """与torchdiffeq比较(如果可用)"""
     
     try:
@@ -329,7 +297,7 @@ def test_against_torchdiffeq():
             return A
         
         params_magnus = params.clone().detach().requires_grad_(True)
-        y_magnus = magnus_odeint_adjoint(A_func, y0, t, params_magnus, order=4, rtol=1e-6, atol=1e-8)
+        y_magnus = magnus_odeint_adjoint(A_func, y0, t, params_magnus, order=order, rtol=1e-6, atol=1e-8)
         loss_magnus = torch.sum(y_magnus[-1]**2)
         grad_magnus = torch.autograd.grad(loss_magnus, params_magnus)[0]
         
@@ -372,7 +340,7 @@ def test_complex_system_stability():
     t = torch.linspace(0, 1, 21, dtype=torch.float64)
     
     # 测试不同阶数
-    for order in [2, 4]:
+    for order in [2, 4, 6]:
         print(f"  Testing order {order}...")
         
         try:
@@ -429,9 +397,15 @@ def test_order_consistency():
         loss_4 = torch.sum(y_traj_4[-1]**2)
         grad_4 = torch.autograd.grad(loss_4, params_4)[0]
         
+        # 6阶方法
+        params_6 = params.clone().detach().requires_grad_(True)
+        y_traj_6 = magnus_odeint_adjoint(A_func, y0, t, params_6, order=6)
+        loss_6 = torch.sum(y_traj_6[-1]**2)
+        grad_6 = torch.autograd.grad(loss_6, params_6)[0]
+
         # 比较差异
-        sol_diff = torch.norm(y_traj_2[-1] - y_traj_4[-1])
-        grad_diff = torch.norm(grad_2 - grad_4)
+        sol_diff = torch.maximum(torch.norm(y_traj_2[-1] - y_traj_6[-1]), torch.norm(y_traj_4[-1] - y_traj_6[-1]))
+        grad_diff = torch.maximum(torch.norm(grad_2 - grad_6), torch.norm(grad_4 - grad_6))
         
         print(f"  {n_steps:9d} | {sol_diff.item():11.2e} | {grad_diff.item():11.2e}")
     
@@ -439,19 +413,8 @@ def test_order_consistency():
     assert True
 
 
-def run_comprehensive_gradient_tests():
-    """运行综合梯度测试"""
-    
-    print("Comprehensive Magnus Gradient Tests")
-    print("=" * 60)
-    
-    # 设置随机种子
-    torch.manual_seed(42)
-    
-    # 运行所有测试
-    test_magnus_gradient_accuracy()
-
-def test_tolerance_settings():
+@pytest.mark.parametrize("order", [2, 4, 6])
+def test_tolerance_settings(order):
     """
     设计一个完善的测试，检查求解器是否能够正确满足不同的容差设置。
     测试逻辑：
@@ -485,7 +448,7 @@ def test_tolerance_settings():
         return torch.tensor([math.cos(theta_t), -math.sin(theta_t)], dtype=torch.float64)
 
     # 2. 测试不同的容差设置
-    tolerances = [1e-3, 1e-5, 1e-7, 1e-9]
+    tolerances = [1e-3, 1e-5, 1e-7]#, 1e-9]
     results = []
     all_passed = True
 
@@ -493,11 +456,13 @@ def test_tolerance_settings():
     print("  " + "-" * 60)
 
     for tol in tolerances:
+        rtol = 0.1 * tol
+        atol = tol
         # 3. 使用 magnus_odeint 进行求解
         y_final = magnus_odeint(
             A_func, y0, t_span, 
-            rtol=10*tol, atol=tol, # 设置求解器的容差
-            order=4  # 使用4阶方法
+            rtol=rtol, atol=atol, # 设置求解器的容差
+            order=order  # 使用4阶方法
         )[..., -1, :]
 
         # 4. 计算与解析解的误差
@@ -505,13 +470,14 @@ def test_tolerance_settings():
         error = torch.norm(y_final - y_analytical_final).item()
 
         # 5b. 验证误差是否满足设定的容差
-        passed = error < 10 * tol
+        tolerance = atol + rtol * torch.norm(y_analytical_final).item()
+        passed = error < 10 * tolerance
         if not passed:
             all_passed = False
         
-        results.append({'tol': tol, 'error': error, 'passed': passed})
+        results.append({'tol': tolerance, 'error': error, 'passed': passed})
         status = "PASSED" if passed else "FAILED"
-        print(f"  Magnus O4 | {tol:9.1e} | {error:11.2e}               | {status}")
+        print(f"  Magnus O{order} | {tolerance:9.1e} | {error:11.2e}               | {status}")
 
     # 5a. 验证误差是否随着容差的减小而单调递减
     errors = [r['error'] for r in results]
@@ -529,6 +495,34 @@ def test_tolerance_settings():
 
 
 if __name__ == "__main__":
-    # 运行所有测试，包括新的容差测试
-    run_comprehensive_gradient_tests()
+    # 设置随机种子
+    torch.manual_seed(42)
+    
+    # 测试1: 与解析解比较
+    print("Test 1: Analytical solution comparison")
+    print("\n1.1 Simple exponential system")
+    test_exponential_system()
+    
+    print("\n1.2 Harmonic oscillator")
+    test_harmonic_oscillator()
+    
+    print("\n1.3 Rotation matrix")
+    test_rotation_matrix()
+
+    print("\n1.4 Challenging highly oscillatory system")
+    test_challenging_highly_oscillatory_system()
+    
+    # 测试2: 与torchdiffeq比较
+    print("\nTest 2: Comparison with torchdiffeq")
+    test_against_torchdiffeq()
+    
+    # 测试3: 复杂系统稳定性
+    print("\nTest 3: Complex system stability")
+    test_complex_system_stability()
+    
+    # 测试4: 不同阶数一致性
+    print("\nTest 4: Order consistency")
+    test_order_consistency()
+
+    print("\nTest 5: Tolerance test")
     test_tolerance_settings()

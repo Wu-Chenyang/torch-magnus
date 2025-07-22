@@ -24,7 +24,7 @@ def analytical_solution(t):
     return torch.stack([torch.cos(theta_t), -torch.sin(theta_t)], dim=-1)
 
 
-@pytest.mark.parametrize("order", [2, 4])
+@pytest.mark.parametrize("order", [2, 4, 6])
 @pytest.mark.parametrize("rtol", [1e-4, 1e-6])
 def test_interpolation_accuracy(order, rtol):
     """
