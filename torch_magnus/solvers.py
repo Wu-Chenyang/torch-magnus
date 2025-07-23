@@ -633,7 +633,7 @@ class AdaptiveGaussKronrod(BaseQuadrature):
         
         # Calculate error for dictionary structure
         diff_dict = {k: I_K[k] - I_G[k] for k in I_K}
-        error = torch.sqrt(sum(torch.norm(v)**2 for v in diff_dict.values()))
+        error = math.sqrt(sum(v.square().sum().item() for v in diff_dict.values()))
         return I_K, error
 
     def forward(self, y_interp_func: Callable, a_interp_func: Callable, functional_A_func: Callable, a: float, b: float, atol: float, rtol: float, params_req: Dict[str, Tensor], max_segments: int = 100) -> Dict[str, Tensor]:
@@ -652,10 +652,10 @@ class AdaptiveGaussKronrod(BaseQuadrature):
         
         # Initialize integral values and error for dictionary structure
         I_total = {k: torch.zeros_like(v) for k, v in params_req.items()}
-        E_total = torch.tensor(0.0, dtype=ref_param.dtype, device=ref_param.device)
+        E_total = 0.0
         
         I_K, error = self._eval_segment(y_interp_func, a_interp_func, functional_A_func, a, b, params_req, nodes, weights_k, weights_g)
-        heap = [(-error.item(), a, b, I_K, error)]
+        heap = [(-error, a, b, I_K, error)]
 
         # Dictionary accumulation
         for k in I_total: I_total[k] += I_K[k]
@@ -665,33 +665,38 @@ class AdaptiveGaussKronrod(BaseQuadrature):
 
         while heap:
             # Calculate total norm for dictionary structure
-            I_total_norm = torch.sqrt(sum(torch.norm(v)**2 for v in I_total.values()))
+            I_total_norm = torch.sqrt(sum(v.square().sum() for v in I_total.values())).item()
             if E_total <= atol + rtol * I_total_norm:
                 break
             if len(heap) >= max_segments:
-                warnings.warn(f"Max segments ({max_segments}) reached. Result may be inaccurate.")
+                warnings.warn(f"Max segments ({max_segments}) reached. Result may be inaccurate. atol: {atol} rtol: {rtol} error: {E_total} tolerance: {atol + rtol * I_total_norm}")
                 break
 
-            neg_err_parent, a_parent, b_parent, I_K_parent, err_parent = heapq.heappop(heap)
+            _, a_parent, b_parent, I_K_parent, err_parent = heapq.heappop(heap)
             
-            for k in I_total: I_total[k] -= I_K_parent[k]
-            E_total -= err_parent
-
-            mid = (a_parent + b_parent) / 2.0
             if abs(b_parent - a_parent) < machine_eps * 100:
-                for k in I_total: I_total[k] += I_K_parent[k]
-                E_total += err_parent
                 warnings.warn(f"Interval {b_parent - a_parent} too small to subdivide further.")
                 continue
+
+            mid = (a_parent + b_parent) / 2.0
 
             I_K_left, err_left = self._eval_segment(y_interp_func, a_interp_func, functional_A_func, a_parent, mid, params_req, nodes, weights_k, weights_g)
             I_K_right, err_right = self._eval_segment(y_interp_func, a_interp_func, functional_A_func, mid, b_parent, params_req, nodes, weights_k, weights_g)
 
-            heapq.heappush(heap, (-err_left.item(), a_parent, mid, I_K_left, err_left))
-            heapq.heappush(heap, (-err_right.item(), mid, b_parent, I_K_right, err_right))
-            
-            for k in I_total: I_total[k] += I_K_left[k] + I_K_right[k]
-            E_total += err_left + err_right
+            posterior_error = 0.0
+            for k in I_total:
+                diff = I_K_left[k] + I_K_right[k] - I_K_parent[k]
+                I_total[k] += diff
+                posterior_error += diff.square().sum().item()
+            posterior_error = math.sqrt(posterior_error)
+
+            refined_err_left = err_left * posterior_error / err_parent 
+            refined_err_right = err_right * posterior_error / err_parent 
+
+            E_total += refined_err_left + refined_err_right - err_parent
+
+            heapq.heappush(heap, (-refined_err_left, a_parent, mid, I_K_left, refined_err_left))
+            heapq.heappush(heap, (-refined_err_right, mid, b_parent, I_K_right, refined_err_right))
             
         return I_total
 
@@ -858,12 +863,9 @@ class _MagnusAdjoint(torch.autograd.Function):
                 full_dict = {**p_dict_req, **buffers_dict}
                 return functional_A_func(t_val, full_dict)
 
-            quad_atol = atol * 0.1
-            quad_rtol = rtol * 0.1
-            
             integral_val_dict = quad_integrator(
                 y_dense_traj, a_dense_traj, A_func_for_quadrature, 
-                t_i, t_prev, quad_atol, quad_rtol, params_req=params_req
+                t_i, t_prev, atol, rtol, params_req=params_req
             )
             
             for k in adj_params:
