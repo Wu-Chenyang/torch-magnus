@@ -159,7 +159,7 @@ class Magnus4th(BaseMagnus):
             A1, A2 = A1.squeeze(-3), A2.squeeze(-3)
         
         alpha1 = h_tensor / 2.0 * (A1 + A2)
-        alpha2 = h_tensor * self._sqrt3 / 12.0 * (A2 - A1) * 12.0
+        alpha2 = h_tensor * self._sqrt3 * (A2 - A1)
         
         Omega = alpha1 - (1/12) * _commutator(alpha1, alpha2)
         
