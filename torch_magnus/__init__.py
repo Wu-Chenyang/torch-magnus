@@ -12,7 +12,7 @@ Available Functions:
 - magnus_solve: A lower-level solver for adaptive-step integration over a single interval.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 from .solvers import (
     magnus_odeint,
