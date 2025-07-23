@@ -35,10 +35,10 @@ pip install -e ".[dev]"
 
 ## API and Usage
 
-The primary functions are `magnus_odeint` and `magnus_odeint_adjoint`.
+The primary functions are `odeint` and `odeint_adjoint`.
 
 ```python
-magnus_odeint(
+odeint(
     A_func_or_module: Union[Callable, nn.Module], 
     y0: Tensor, 
     t: Union[Sequence[float], torch.Tensor],
@@ -66,7 +66,7 @@ A tensor of shape `(*batch_shape, N, dim)` containing the solution trajectories 
 
 ---
 
-`magnus_odeint_adjoint` has the same signature but uses a more memory-efficient method for computing gradients, making it ideal for training and optimization.
+`odeint_adjoint` has the same signature but uses a more memory-efficient method for computing gradients, making it ideal for training and optimization.
 
 ## Example: Batch Solving and Parameter Learning
 
@@ -76,7 +76,7 @@ The example models a batch of linear ODE systems of the form $y′(t)=A⋅y(t)$.
 ```python
 import torch
 import torch.nn as nn
-from torch_magnus import magnus_odeint, magnus_odeint_adjoint
+from torch_magnus import odeint, odeint_adjoint
 
 dim = 2
 dtype = torch.float64
@@ -98,7 +98,7 @@ with torch.no_grad():
         else:
             return torch.ones_like(t_tensor) * outputs
 
-    y_target = magnus_odeint(A_target_func, y0, t_span)
+    y_target = odeint(A_target_func, y0, t_span)
     y_target += torch.randn_like(y_target) * 0.1
 
 # Create a learnable system
@@ -119,7 +119,7 @@ print(f"Target W: {true_W.numpy().tolist()}, Initial W: {W.detach().numpy().toli
 
 for i in range(300):
     optimizer.zero_grad()  # Clear gradients
-    y_pred = magnus_odeint_adjoint(A_learnable_func, y0, t_span, params=W)
+    y_pred = odeint_adjoint(A_learnable_func, y0, t_span, params=W)
     loss = torch.mean((y_pred - y_target).square())
     loss.backward()
     optimizer.step()

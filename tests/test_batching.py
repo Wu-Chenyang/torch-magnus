@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import unittest
 import math
-from torch_magnus import magnus_odeint, magnus_odeint_adjoint, magnus_solve
+from torch_magnus import odeint, odeint_adjoint, adaptive_ode_solve
 
 class LinearMatrixModule(nn.Module):
     """A simple nn.Module that defines a time-independent linear system."""
@@ -29,7 +29,7 @@ class LinearMatrixModule(nn.Module):
 class TestMagnusSolver(unittest.TestCase):
 
     def test_batch_solve_shape(self):
-        """测试 magnus_odeint 和 magnus_odeint_adjoint 在批处理模式下的输出形状是否正确。"""
+        """测试 odeint 和 odeint_adjoint 在批处理模式下的输出形状是否正确。"""
         dim = 2
         batch_shape = (2, 3)
         y0 = torch.randn(*batch_shape, dim)
@@ -46,13 +46,13 @@ class TestMagnusSolver(unittest.TestCase):
             else:
                 raise ValueError(f"Unsupported time shape: {t.shape}")
 
-        # Test magnus_odeint shape
-        solution_odeint = magnus_odeint(A_func, y0, t_span)
+        # Test odeint shape
+        solution_odeint = odeint(A_func, y0, t_span)
         expected_shape = (*batch_shape, len(t_span), dim)
         self.assertEqual(solution_odeint.shape, expected_shape)
 
-        # Test magnus_odeint_adjoint shape
-        solution_adjoint = magnus_odeint_adjoint(A_func, y0, t_span)
+        # Test odeint_adjoint shape
+        solution_adjoint = odeint_adjoint(A_func, y0, t_span)
         self.assertEqual(solution_adjoint.shape, expected_shape)
 
     def test_accuracy_batch(self):
@@ -78,20 +78,20 @@ class TestMagnusSolver(unittest.TestCase):
         atol = 1e-8
         rtol = 1e-6
 
-        # Test magnus_odeint accuracy
-        y_numerical_odeint = magnus_odeint(A_func, y0, t_span, order=4, rtol=rtol, atol=atol)
+        # Test odeint accuracy
+        y_numerical_odeint = odeint(A_func, y0, t_span, order=4, rtol=rtol, atol=atol)
         error_odeint = torch.norm(y_numerical_odeint[..., -1, :] - y_analytical[..., -1, :])
         print(f"Accuracy test error (odeint, batch): {error_odeint.item()}")
         self.assertTrue(error_odeint < 10 * (atol + rtol * torch.norm(y_analytical[..., -1, :]).item()))
 
-        # Test magnus_odeint_adjoint accuracy
-        y_numerical_adjoint = magnus_odeint_adjoint(A_func, y0, t_span, order=4, rtol=rtol, atol=atol)
+        # Test odeint_adjoint accuracy
+        y_numerical_adjoint = odeint_adjoint(A_func, y0, t_span, order=4, rtol=rtol, atol=atol)
         error_adjoint = torch.norm(y_numerical_adjoint[..., -1, :] - y_analytical[..., -1, :])
         print(f"Accuracy test error (adjoint, batch): {error_adjoint.item()}")
         self.assertTrue(error_adjoint < 10 * (atol + rtol * torch.norm(y_analytical[..., -1, :]).item()))
 
     def test_gradient_backpropagation_batch(self):
-        """测试使用 magnus_odeint_adjoint 进行批量梯度反向传播和参数学习，并分析收敛性能。"""
+        """测试使用 odeint_adjoint 进行批量梯度反向传播和参数学习，并分析收敛性能。"""
         dim = 2
         batch_shape = (2, 3) 
         y0 = torch.randn(*batch_shape, dim) # Initial condition
@@ -117,7 +117,7 @@ class TestMagnusSolver(unittest.TestCase):
                     raise ValueError(f"Unsupported time shape for A_target_func: {t.shape}")
         
         with torch.no_grad():
-            y_target = magnus_odeint(A_target_func, y0, t_span)
+            y_target = odeint(A_target_func, y0, t_span)
 
         w = torch.nn.Parameter(torch.tensor(0.5))
         optimizer = torch.optim.Adam([w], lr=1e-2) 
@@ -146,7 +146,7 @@ class TestMagnusSolver(unittest.TestCase):
         num_iterations = 100 
         for i in range(num_iterations):
             optimizer.zero_grad()
-            y_pred = magnus_odeint_adjoint(A_learnable_func, y0, t_span, params=w) 
+            y_pred = odeint_adjoint(A_learnable_func, y0, t_span, params=w) 
             loss = torch.mean((y_pred - y_target)**2)
             loss.backward()
             optimizer.step()
@@ -174,7 +174,7 @@ class TestMagnusSolver(unittest.TestCase):
             else:
                 raise ValueError(f"Unsupported time shape: {t.shape}")
 
-        traj_batch, _ = magnus_solve(y0_batch, t_span_solve, A_func_batch, {}, order=4, return_traj=True)
+        traj_batch, _ = adaptive_ode_solve(y0_batch, t_span_solve, A_func_batch, {}, order=4, return_traj=True)
         steps_batch = len(traj_batch)
 
         total_steps_individual = 0
@@ -189,7 +189,7 @@ class TestMagnusSolver(unittest.TestCase):
                 else:
                     raise ValueError(f"Unsupported time shape: {t.shape}")
             
-            traj_individual, _ = magnus_solve(y0_individual, t_span_solve, A_func_individual, {}, order=4, return_traj=True)
+            traj_individual, _ = adaptive_ode_solve(y0_individual, t_span_solve, A_func_individual, {}, order=4, return_traj=True)
             total_steps_individual += len(traj_individual)
 
         print(f"Steps (batch solve): {steps_batch}")
@@ -212,7 +212,7 @@ class TestMagnusSolver(unittest.TestCase):
         t_span = torch.linspace(0, math.pi, 10, dtype=dtype)
 
         with torch.no_grad():
-            y_target = magnus_odeint(target_module, y0, t_span)
+            y_target = odeint(target_module, y0, t_span)
 
         # 2. Create a learnable module
         learnable_module = LinearMatrixModule(dim, batch_shape).to(dtype)
@@ -226,7 +226,7 @@ class TestMagnusSolver(unittest.TestCase):
         
         # First step
         optimizer.zero_grad()
-        y_pred_initial = magnus_odeint_adjoint(learnable_module, y0, t_span)
+        y_pred_initial = odeint_adjoint(learnable_module, y0, t_span)
         loss_initial = torch.mean((y_pred_initial - y_target)**2)
         loss_initial.backward()
         optimizer.step()
@@ -238,7 +238,7 @@ class TestMagnusSolver(unittest.TestCase):
         # Run a few more steps
         for i in range(1, 10):
             optimizer.zero_grad()
-            y_pred = magnus_odeint_adjoint(learnable_module, y0, t_span)
+            y_pred = odeint_adjoint(learnable_module, y0, t_span)
             loss = torch.mean((y_pred - y_target)**2)
             loss.backward()
             optimizer.step()

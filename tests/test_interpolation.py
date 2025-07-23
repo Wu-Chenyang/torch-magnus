@@ -2,7 +2,7 @@ import torch
 import math
 import numpy as np
 import pytest
-from torch_magnus import magnus_odeint
+from torch_magnus import odeint
 
 # Define the highly oscillatory system for testing
 w0, w1, w2 = 10.0, 5.0, 20.0
@@ -43,7 +43,7 @@ def test_interpolation_accuracy(order, rtol):
     t_span = torch.linspace(0, 0.5, 10, dtype=torch.float64)
 
     # Solve the ODE and request dense output
-    solution = magnus_odeint(
+    solution = odeint(
         A_func,
         y0,
         t_span,

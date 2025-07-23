@@ -1,5 +1,5 @@
 import torch
-from torch_magnus import magnus_odeint
+from torch_magnus import odeint
 
 def main():
     """Example of solving a simple time-dependent ODE."""
@@ -25,9 +25,9 @@ def main():
     print(f"Time points: {t_span.numpy()}")
 
     # 3. Call the solver
-    # We use magnus_odeint, which is imported from our new package.
+    # We use odeint, which is imported from our new package.
     # Since A_func has no trainable parameters, we pass `params=None`.
-    solution_trajectory = magnus_odeint(
+    solution_trajectory = odeint(
         A_func_or_module=A_func,
         y0=y0,
         t=t_span,

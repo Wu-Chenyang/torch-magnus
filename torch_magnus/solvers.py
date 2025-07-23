@@ -108,28 +108,34 @@ def _prepare_functional_call(A_func_or_module: Union[Callable, nn.Module], param
 # Magnus Single-Step Integrators
 # -----------------------------------------------------------------------------
 
-class BaseMagnus(nn.Module):
-    """Base class for Magnus integrators."""
+class BaseStepper(nn.Module):
+    """
+    Abstract base class for single-step integrators for linear ODEs.
+    Defines the interface for all steppers, such as Magnus or GLRK.
+    """
     order: int
 
-    def forward(self, A: Callable[[float], Tensor],
-                t0: float, h: float, y0: Tensor) -> Tensor:
+    def forward(self, A_func: Callable, t0: float, h: float, y0: Tensor) -> Tuple[Tensor, Tensor]:
         """
-        Perform one Magnus integration step.
-        
+        Perform a single integration step.
+
         Args:
-            A: Matrix function A(t) returning (..., *batch_shape, dim, dim)
-            t0: Initial time
-            h: Step size
-            y0: Initial state of shape (..., *batch_shape, dim)
-            
+            A_func: A function that returns the matrix A for a given time t.
+            t0: The initial time of the step.
+            h: The step size.
+            y0: The initial state tensor of shape (..., *batch_shape, dim).
+
         Returns:
-            Tuple of (y_next, intermediate_data)
+            A tuple containing:
+            - y_next (Tensor): The solution at time t0 + h.
+            - aux_data (Tensor): Auxiliary data computed during the step,
+                                 such as matrix evaluations at quadrature nodes,
+                                 which can be used for dense output.
         """
-        raise NotImplementedError
+        raise NotImplementedError("step() must be implemented by subclasses.")
 
 
-class Magnus2nd(BaseMagnus):
+class Magnus2nd(BaseStepper):
     """Second-order Magnus integrator using midpoint rule."""
     order = 2
     
@@ -142,7 +148,7 @@ class Magnus2nd(BaseMagnus):
         return y_next, A1.unsqueeze(0)
 
 
-class Magnus4th(BaseMagnus):
+class Magnus4th(BaseStepper):
     """Fourth-order Magnus integrator using two-point Gauss quadrature."""
     order = 4
     _sqrt3 = math.sqrt(3.0)
@@ -168,7 +174,7 @@ class Magnus4th(BaseMagnus):
         
         return y_next, torch.stack((A1, A2), dim=0)
 
-class Magnus6th(BaseMagnus):
+class Magnus6th(BaseStepper):
     """Sixth-order Magnus integrator using three-point Gauss quadrature."""
     order = 6
     _sqrt15 = math.sqrt(15.0)
@@ -412,7 +418,7 @@ class CollocationDenseOutput:
 # ODE Solver Interface
 # -----------------------------------------------------------------------------
 
-def magnus_solve(
+def adaptive_ode_solve(
     y0: Tensor, t_span: TimeSpan, 
     functional_A_func: Callable, p_dict: Dict[str, Tensor],
     order: int = 4, rtol: float = 1e-6, atol: float = 1e-8, 
@@ -421,9 +427,9 @@ def magnus_solve(
 
 ):
     """
-    Solve linear ODE system using adaptive Magnus integrator.
+    Generic adaptive step-size solver for linear ODEs.
     
-    Solves dy/dt = A(t, params) * y with initial condition y(t0) = y0.
+    Solves dy/dt = A(t, params) * y with a given stepper module.
     
     Args:
         y0: Initial conditions of shape (*batch_shape, dim)
@@ -513,7 +519,7 @@ def magnus_solve(
                 return DenseOutputNaive(ys_out, ts_out, order, A_func_bound)
     return y
 
-def magnus_odeint(
+def odeint(
     A_func_or_module: Union[Callable, nn.Module], y0: Tensor, t: Union[Sequence[float], torch.Tensor],
     params: Tensor = None,
     order: int = 4, rtol: float = 1e-6, atol: float = 1e-8,
@@ -546,7 +552,7 @@ def magnus_odeint(
     t_vec = torch.as_tensor(t, dtype=y0.dtype, device=y0.device)
 
     if dense_output:
-        return magnus_solve(
+        return adaptive_ode_solve(
             y0, (t_vec[0], t_vec[-1]), functional_A_func, p_dict, 
             order, rtol, atol, dense_output=True, dense_output_method=dense_output_method
         )
@@ -555,7 +561,7 @@ def magnus_odeint(
         y_curr = y0
         for i in range(len(t_vec) - 1):
             t0, t1 = float(t_vec[i]), float(t_vec[i + 1])
-            y_next = magnus_solve(y_curr, (t0, t1), functional_A_func, p_dict, order, rtol, atol)
+            y_next = adaptive_ode_solve(y_curr, (t0, t1), functional_A_func, p_dict, order, rtol, atol)
             ys_out.append(y_next)
             y_curr = y_next
         return torch.stack(ys_out, dim=-2)
@@ -778,9 +784,9 @@ class _MagnusAdjoint(torch.autograd.Function):
         
         t = t.to(y0.dtype)
         with torch.no_grad():
-            y_dense_traj = magnus_solve(
+            y_dense_traj = adaptive_ode_solve(
                 y0, (t[0], t[-1]), functional_A_func, params_and_buffers_dict, 
-                order, rtol, atol, dense_output=True
+                order=order, rtol=rtol, atol=atol, dense_output=True
             )
             y_traj = y_dense_traj(t)
 
@@ -854,9 +860,9 @@ class _MagnusAdjoint(torch.autograd.Function):
             t_i, t_prev = float(t[i]), float(t[i - 1])
 
             with torch.no_grad():
-                a_dense_traj = magnus_solve(
+                a_dense_traj = adaptive_ode_solve(
                     adj_y, (t_i, t_prev), neg_trans_A_func, full_p_dict_for_solve, 
-                    order, rtol, atol, dense_output=True
+                    order=order, rtol=rtol, atol=atol, dense_output=True
                 )
 
             def A_func_for_quadrature(t_val, p_dict_req):
@@ -897,7 +903,7 @@ class _MagnusAdjoint(torch.autograd.Function):
 # User-Friendly Interface
 # -----------------------------------------------------------------------------
 
-def magnus_odeint_adjoint(
+def odeint_adjoint(
     A_func_or_module: Union[Callable, nn.Module], y0: Tensor, t: Union[Sequence[float], torch.Tensor],
     params: Tensor = None,
     order: int = 4, rtol: float = 1e-6, atol: float = 1e-8,
@@ -906,7 +912,7 @@ def magnus_odeint_adjoint(
     """
     Solve linear ODE system with memory-efficient adjoint gradient computation.
     
-    This function provides the same interface as magnus_odeint but uses the adjoint
+    This function provides the same interface as odeint but uses the adjoint
     sensitivity method for efficient gradient computation through the ODE solution.
     
     Args:

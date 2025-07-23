@@ -1,4 +1,4 @@
-from torch_magnus import magnus_odeint, magnus_odeint_adjoint, magnus_solve
+from torch_magnus import odeint, odeint_adjoint, adaptive_ode_solve
 
 import torch
 import math
@@ -28,7 +28,7 @@ def test_exponential_system(order):
     t = torch.tensor([0.0, T], dtype=torch.float64)
     
     # Magnus求解
-    y_traj = magnus_odeint_adjoint(A_func, y0, t, params, order=order, rtol=1e-6, atol=1e-8)
+    y_traj = odeint_adjoint(A_func, y0, t, params, order=order, rtol=1e-6, atol=1e-8)
     
     # 解析解: y(T) = [exp(p1*T), 2*exp(p2*T)]
     y_analytical = torch.tensor([
@@ -83,7 +83,7 @@ def test_harmonic_oscillator(order):
     t = torch.tensor([0.0, T], dtype=torch.float64)
     
     # Magnus求解
-    y_traj = magnus_odeint_adjoint(A_func, y0, t, params, order=order, rtol=1e-6, atol=1e-8)
+    y_traj = odeint_adjoint(A_func, y0, t, params, order=order, rtol=1e-6, atol=1e-8)
     
         # 解析解: y(T) = [cos(ωT), -ω*sin(ωT)]
     y_analytical = torch.tensor([
@@ -151,7 +151,7 @@ def test_rotation_matrix(order):
     t = torch.tensor([0.0, T], dtype=torch.float64)
     
     # Magnus求解
-    y_traj = magnus_odeint_adjoint(A_func, y0, t, params, order=order, rtol=1e-6, atol=1e-8)
+    y_traj = odeint_adjoint(A_func, y0, t, params, order=order, rtol=1e-6, atol=1e-8)
     
     # 解析解: y(T) = [cos(ωT), -sin(ωT)]
     y_analytical = torch.tensor([
@@ -207,7 +207,7 @@ def test_challenging_highly_oscillatory_system(order):
     t = torch.tensor([0.0, T], dtype=torch.float64)
 
     # Magnus求解
-    y_traj = magnus_odeint_adjoint(A_func, y0, t, params, order=order, rtol=1e-6, atol=1e-8)
+    y_traj = odeint_adjoint(A_func, y0, t, params, order=order, rtol=1e-6, atol=1e-8)
 
     # 解析解
     if w2 == 0:
@@ -297,7 +297,7 @@ def test_against_torchdiffeq(order):
             return A
         
         params_magnus = params.clone().detach().requires_grad_(True)
-        y_magnus = magnus_odeint_adjoint(A_func, y0, t, params_magnus, order=order, rtol=1e-6, atol=1e-8)
+        y_magnus = odeint_adjoint(A_func, y0, t, params_magnus, order=order, rtol=1e-6, atol=1e-8)
         loss_magnus = torch.sum(y_magnus[-1]**2)
         grad_magnus = torch.autograd.grad(loss_magnus, params_magnus)[0]
         
@@ -344,7 +344,7 @@ def test_complex_system_stability():
         print(f"  Testing order {order}...")
         
         try:
-            y_traj = magnus_odeint_adjoint(A_func, y0, t, params, order=order)
+            y_traj = odeint_adjoint(A_func, y0, t, params, order=order)
             loss = torch.sum(y_traj[-1]**2)
             grad = torch.autograd.grad(loss, params, retain_graph=True)[0]
             
@@ -387,19 +387,19 @@ def test_order_consistency():
         
         # 2阶方法
         params_2 = params.clone().detach().requires_grad_(True)
-        y_traj_2 = magnus_odeint_adjoint(A_func, y0, t, params_2, order=2)
+        y_traj_2 = odeint_adjoint(A_func, y0, t, params_2, order=2)
         loss_2 = torch.sum(y_traj_2[-1]**2)
         grad_2 = torch.autograd.grad(loss_2, params_2)[0]
         
         # 4阶方法
         params_4 = params.clone().detach().requires_grad_(True)
-        y_traj_4 = magnus_odeint_adjoint(A_func, y0, t, params_4, order=4)
+        y_traj_4 = odeint_adjoint(A_func, y0, t, params_4, order=4)
         loss_4 = torch.sum(y_traj_4[-1]**2)
         grad_4 = torch.autograd.grad(loss_4, params_4)[0]
         
         # 6阶方法
         params_6 = params.clone().detach().requires_grad_(True)
-        y_traj_6 = magnus_odeint_adjoint(A_func, y0, t, params_6, order=6)
+        y_traj_6 = odeint_adjoint(A_func, y0, t, params_6, order=6)
         loss_6 = torch.sum(y_traj_6[-1]**2)
         grad_6 = torch.autograd.grad(loss_6, params_6)[0]
 
@@ -420,7 +420,7 @@ def test_tolerance_settings(order):
     测试逻辑：
     1. 定义一个高度振荡的时变系统。
     2. 设置一系列递减的容差值（rtol 和 atol）。
-    3. 使用 magnus_solve 在每个容差设置下求解ODE。
+    3. 使用 adaptive_ode_solve 在每个容差设置下求解ODE。
     4. 计算数值解与解析解在终点的误差。
     5. 验证：
         a) 随着容差的减小，计算出的误差是否也单调递减。
@@ -459,8 +459,8 @@ def test_tolerance_settings(order):
     for tol in tolerances:
         rtol = 0.1 * tol
         atol = tol
-        # 3. 使用 magnus_odeint 进行求解
-        y_final = magnus_odeint(
+        # 3. 使用 odeint 进行求解
+        y_final = odeint(
             A_func, y0, t_span, 
             rtol=rtol, atol=atol, # 设置求解器的容差
             order=order  # 使用4阶方法
