@@ -133,24 +133,13 @@ class Magnus2nd(BaseMagnus):
     """Second-order Magnus integrator using midpoint rule."""
     order = 2
     
-    def forward(self, A: Callable[..., Tensor], t0: Union[Sequence[float], torch.Tensor, float], h: Union[Sequence[float], torch.Tensor, float], y0: Tensor) -> Tensor:
-        """
-        Second-order Magnus step: Omega = h * A(t0 + h/2)
-        
-        Args:
-            A: Matrix function returning (..., *batch_shape, dim, dim)
-            t0: Initial time
-            h: Step size  
-            y0: Initial state of shape (..., *batch_shape, dim)
-            
-        Returns:
-            y_next: Next state of shape (..., *batch_shape, dim)
-        """
+    def forward(self, A: Callable[..., Tensor], t0: Union[Sequence[float], torch.Tensor, float], h: Union[Sequence[float], torch.Tensor, float], y0: Tensor) -> Tuple[Tensor, Tuple[Tensor, ...]]:
         A1 = A(t0 + 0.5 * h)
-        h = torch.as_tensor(h).unsqueeze(-1).unsqueeze(-1)
-        Omega = h * A1
+        h_tensor = torch.as_tensor(h, device=y0.device, dtype=y0.dtype).unsqueeze(-1).unsqueeze(-1)
+        Omega = h_tensor * A1
         U = _matrix_exp(Omega)
-        return _apply_matrix(U, y0)
+        y_next = _apply_matrix(U, y0)
+        return y_next, A1.unsqueeze(0)
 
 
 class Magnus4th(BaseMagnus):
@@ -159,33 +148,25 @@ class Magnus4th(BaseMagnus):
     _sqrt3 = math.sqrt(3.0)
     _c1, _c2 = 0.5 - _sqrt3 / 6, 0.5 + _sqrt3 / 6
 
-    def forward(self, A: Callable[..., Tensor], t0: Union[Sequence[float], torch.Tensor, float], h: Union[Sequence[float], torch.Tensor, float], y0: Tensor) -> Tensor:
-        """
-        Fourth-order Magnus step with commutator correction.
-        
-        Args:
-            A: Matrix function returning (..., *batch_shape, dim, dim)
-            t0: Initial time
-            h: Step size
-            y0: Initial state of shape (..., *batch_shape, dim)
-            
-        Returns:
-            y_next: Next state of shape (..., *batch_shape, dim)
-        """
+    def forward(self, A: Callable[..., Tensor], t0: Union[Sequence[float], torch.Tensor, float], h: Union[Sequence[float], torch.Tensor, float], y0: Tensor) -> Tuple[Tensor, Tuple[Tensor, ...]]:
+        t0 = torch.as_tensor(t0, device=y0.device, dtype=y0.dtype)
         t1, t2 = t0 + self._c1 * h, t0 + self._c2 * h
-        h = torch.as_tensor(h).unsqueeze(-1).unsqueeze(-1)
-        A1h = h * A(t1)
-        A2h = h * A(t2)
+        h_tensor = torch.as_tensor(h, device=y0.device, dtype=y0.dtype).unsqueeze(-1).unsqueeze(-1)
         
-        B = 0.5 * (A1h + A2h)
-        C = (A2h - A1h) * self._sqrt3 / 12.0
-        K = _commutator(B, C)
+        A12 = A(torch.cat([t1.view(-1), t2.view(-1)]))
+        A1, A2 = A12.split(t1.numel(), dim=-3)
+        if t1.ndim == 0:
+            A1, A2 = A1.squeeze(-3), A2.squeeze(-3)
         
-        Omega = B - K / 12.0
+        alpha1 = h_tensor / 2.0 * (A1 + A2)
+        alpha2 = h_tensor * self._sqrt3 / 12.0 * (A2 - A1) * 12.0
+        
+        Omega = alpha1 - (1/12) * _commutator(alpha1, alpha2)
+        
         U = _matrix_exp(Omega)
         y_next = _apply_matrix(U, y0)
         
-        return y_next
+        return y_next, torch.stack((A1, A2), dim=0)
 
 class Magnus6th(BaseMagnus):
     """Sixth-order Magnus integrator using three-point Gauss quadrature."""
@@ -193,25 +174,15 @@ class Magnus6th(BaseMagnus):
     _sqrt15 = math.sqrt(15.0)
     _c1, _c2, _c3 = 0.5 - _sqrt15 / 10, 0.5, 0.5 + _sqrt15 / 10
 
-    def forward(self, A: Callable[..., Tensor], t0: Union[Sequence[float], torch.Tensor, float], h: Union[Sequence[float], torch.Tensor, float], y0: Tensor) -> Tensor:
-        """
-        Sixth-order Magnus step with an optimized number of commutators.
-        
-        Args:
-            A: Matrix function returning (..., *batch_shape, dim, dim)
-            t0: Initial time
-            h: Step size
-            y0: Initial state of shape (..., *batch_shape, dim)
-            
-        Returns:
-            y_next: Next state of shape (..., *batch_shape, dim)
-        """
+    def forward(self, A: Callable[..., Tensor], t0: Union[Sequence[float], torch.Tensor, float], h: Union[Sequence[float], torch.Tensor, float], y0: Tensor) -> Tuple[Tensor, Tuple[Tensor, ...]]:
+        t0 = torch.as_tensor(t0, device=y0.device, dtype=y0.dtype)
         t1, t2, t3 = t0 + self._c1 * h, t0 + self._c2 * h, t0 + self._c3 * h
-        h_tensor = torch.as_tensor(h).unsqueeze(-1).unsqueeze(-1)
+        h_tensor = torch.as_tensor(h, device=y0.device, dtype=y0.dtype).unsqueeze(-1).unsqueeze(-1)
 
-        A1 = A(t1)
-        A2 = A(t2)
-        A3 = A(t3)
+        A123 = A(torch.cat([t1.view(-1), t2.view(-1), t3.view(-1)]))
+        A1, A2, A3 = A123.split(t1.numel(), dim=-3)
+        if t1.ndim == 0:
+            A1, A2, A3 = A1.squeeze(-3), A2.squeeze(-3), A3.squeeze(-3)
 
         alpha1 = h_tensor * A2
         alpha2 = h_tensor * self._sqrt15 / 3.0 * (A3 - A1)
@@ -220,21 +191,24 @@ class Magnus6th(BaseMagnus):
         C1 = _commutator(alpha1, alpha2)
         C2 = -1/60 * _commutator(alpha1, 2 * alpha3 + C1)
         
-        Omega = alpha1 + alpha3/12 + (1/240)*_commutator(-20*alpha1 - alpha3 + C1, alpha2 + C2)
+        term_in_comm = -20*alpha1 - alpha3 + C1
+        term_with_comm = alpha2 + C2
+        Omega = alpha1 + alpha3/12 + (1/240)*_commutator(term_in_comm, term_with_comm)
 
         U = _matrix_exp(Omega)
         y_next = _apply_matrix(U, y0)
         
-        return y_next
+        return y_next, torch.stack((A1, A2, A3), dim=0)
 
 # -----------------------------------------------------------------------------
 # Dense Output (Continuous Extension)
 # -----------------------------------------------------------------------------
 
-class DenseOutput:
+class DenseOutputNaive:
     """
     Provides continuous interpolation between Magnus integration steps by re-running
-    the integrator for a single step from the last grid point.
+    the integrator for a single step from the last grid point. It requires s extra function
+    evaluations for each interpolation but maintains the 2s order accuracy of the solver.
     """
     
     def __init__(self, ys: Tensor, ts: Tensor, order: int, A_func: Callable):
@@ -255,14 +229,10 @@ class DenseOutput:
              self.t_grid = torch.flip(self.t_grid, dims=[0])
              self.ys = torch.flip(self.ys, dims=[-2])
 
-        if self.order == 2:
-            self.integrator = Magnus2nd()
-        elif self.order == 4:
-            self.integrator = Magnus4th()
-        elif self.order == 6:
-            self.integrator = Magnus6th()
-        else:
-            raise ValueError(f"Invalid order: {order}")
+        if self.order == 2: self.integrator = Magnus2nd()
+        elif self.order == 4: self.integrator = Magnus4th()
+        elif self.order == 6: self.integrator = Magnus6th()
+        else: raise ValueError(f"Invalid order: {order}")
 
     def __call__(self, t_batch: Tensor) -> Tensor:
         """
@@ -289,9 +259,118 @@ class DenseOutput:
         h_new = t_batch - t0
 
         # Perform a single integration step for each point
-        y_interp = self.integrator(self.A_func, t0, h_new, y0)
+        y_interp, _ = self.integrator(self.A_func, t0, h_new, y0)
         
         return y_interp
+
+class CollocationDenseOutput:
+    """
+    Efficient, s-order (for s function evaluation) dense output using polynomial interpolation of the generator
+    based on cached Gauss-Legendre node evaluations.
+    """
+    def __init__(self, ys: Tensor, ts: Tensor, A_nodes_traj: List[Tuple[Tensor, ...]], order: int):
+        self.order = order
+        self.ys = ys
+        self.ts = ts
+        self.hs = ts[1:] - ts[:-1]
+        self.A_nodes_traj = A_nodes_traj
+
+        if self.ts[0] > self.ts[-1]:
+            self.ts = torch.flip(self.ts, dims=[0])
+            self.ys = torch.flip(self.ys, dims=[-2])
+            self.hs = torch.flip(self.hs, dims=[0])
+            self.A_nodes_traj = torch.flip(self.A_nodes_traj, dims=[-3])
+
+        if order not in [2, 4, 6]:
+            raise ValueError(f"Efficient dense output not implemented for order {order}")
+
+    def __call__(self, t_batch: Tensor) -> Tensor:
+        """
+        Evaluate solution at given time points using pre-computed data.
+        """
+        indices = torch.searchsorted(self.ts, t_batch, right=True) - 1
+        indices = torch.clamp(indices, 0, len(self.ts) - 2)
+
+        t0 = self.ts[indices]
+        h = self.hs[indices]
+        if indices.ndim == 0:
+            y0 = self.ys[..., indices, :]
+            A_nodes = self.A_nodes_traj[..., indices, :, :]
+        else:
+            y0 = torch.gather(self.ys, -2, indices.unsqueeze(-1).expand((*self.ys.shape[:-2], indices.shape[0], self.ys.shape[-1])))
+            A_nodes = torch.gather(self.A_nodes_traj, -3, indices.unsqueeze(-1).unsqueeze(-1).expand((*self.A_nodes_traj.shape[:-3], indices.shape[0], *self.A_nodes_traj.shape[-2:])))
+        
+        # Normalize time to theta in [0, 1]
+        theta = (t_batch - t0) / h
+        
+        # Add required dimensions for broadcasting with matrix shapes
+        h_exp = h.view(*h.shape, 1, 1)
+        theta_exp = theta.view(*theta.shape, 1, 1)
+
+        # Dispatch to the correct interpolation method
+        if self.order == 2:
+            A1_nodes = A_nodes[0]
+            Omega = self._interpolate_2nd(theta_exp, h_exp, A1_nodes)
+        elif self.order == 4:
+            A1_nodes = A_nodes[0]
+            A2_nodes = A_nodes[1]
+            Omega = self._interpolate_4th(theta_exp, h_exp, A1_nodes, A2_nodes)
+        elif self.order == 6:
+            A1_nodes = A_nodes[0]
+            A2_nodes = A_nodes[1]
+            A3_nodes = A_nodes[2]
+            Omega = self._interpolate_6th(theta_exp, h_exp, A1_nodes, A2_nodes, A3_nodes)
+
+        U = _matrix_exp(Omega)
+        return _apply_matrix(U, y0)
+
+    def _interpolate_2nd(self, theta, h, A1):
+        return theta * h * A1
+
+    def _interpolate_4th(self, theta, h, A1, A2):
+        sqrt3 = math.sqrt(3.0)
+        theta2 = theta.pow(2)
+        theta3 = theta.pow(3)
+
+        b01 = (0.5 + sqrt3 / 2) * theta - (sqrt3 / 2) * theta2
+        b02 = (0.5 - sqrt3 / 2) * theta + (sqrt3 / 2) * theta2
+
+        term1 = h * (A1 * b01 + A2 * b02)
+        term2 = (h.pow(2) * sqrt3 * theta3 / 12.0) * _commutator(A1, A2)
+        
+        return term1 - term2
+
+    def _interpolate_6th(self, theta, h, A1, A2, A3):
+        d = math.sqrt(15.0)
+        t2 = theta.pow(2)
+        t3 = theta.pow(3)
+
+        # Gamma polynomials
+        g11 = (5/6)*t3 - (5/3 + d/6)*t2 + (5/6 + d/6)*theta
+        g12 = (-5/3)*t3 + (10/3)*t2 - (2/3)*theta
+        g13 = (5/6)*t3 - (5/3 - d/6)*t2 + (5/6 - d/6)*theta
+
+        g21 = (10/3)*t3 - (10/3 + d/3)*t2
+        g22 = (-20/3)*t3 + (20/3)*t2
+        g23 = (10/3)*t3 - (10/3 - d/3)*t2
+
+        g31 = (10/3)*t3
+        g32 = (-20/3)*t3
+        g33 = (10/3)*t3
+
+        # Alpha terms
+        alpha1 = h * (A1*g11 + A2*g12 + A3*g13)
+        alpha2 = h * (A1*g21 + A2*g22 + A3*g23)
+        alpha3 = h * (A1*g31 + A2*g32 + A3*g33)
+
+        # Assemble Omega
+        C1 = _commutator(alpha1, alpha2)
+        C2 = -1/60 * _commutator(alpha1, 2 * alpha3 + C1)
+        term_in_comm = -20*alpha1 - alpha3 + C1
+        term_with_comm = alpha2 + C2
+        Omega = alpha1 + alpha3/12 + (1/240)*_commutator(term_in_comm, term_with_comm)
+        
+        return Omega
 
 # -----------------------------------------------------------------------------
 # ODE Solver Interface
@@ -302,7 +381,8 @@ def magnus_solve(
     functional_A_func: Callable, p_dict: Dict[str, Tensor],
     order: int = 4, rtol: float = 1e-6, atol: float = 1e-8, 
     return_traj: bool = False, dense_output: bool = False, 
-    max_steps: int = 10_000
+    max_steps: int = 10_000, dense_output_method: str = 'naive',
+
 ):
     """
     Solve linear ODE system using adaptive Magnus integrator.
@@ -332,21 +412,18 @@ def magnus_solve(
     elif order == 6: integrator = Magnus6th()
     else: raise ValueError("order must be 2, 4, or 6")
 
+    # Bind p_dict to A_func
+    A_func_bound = lambda tau: functional_A_func(tau, p_dict)
+
     t0, t1 = float(t_span[0]), float(t_span[1])
-    if t0 == t1:
-        ys, ts = y0.unsqueeze(-2), torch.tensor([t0])
-        if return_traj: return ys, ts
-        if dense_output: return DenseOutput(ys, ts, order, lambda t: functional_A_func(t, p_dict))
-        return y0
+    assert t0 != t1
 
     # Use signed step size dt to unify forward and backward integration
     dt = t1 - t0
     t, y = t0, y0.clone()
     ts, ys = [t], [y]
+    A_nodes_traj = []
     step_cnt = 0
-    
-    # Bind p_dict to A_func
-    A_func_bound = lambda tau: functional_A_func(tau, p_dict)
 
     while (t - t1) * dt < 0:
         if step_cnt >= max_steps:
@@ -355,21 +432,25 @@ def magnus_solve(
             dt = t1 - t
 
         dt_half = 0.5 * dt
-        y_big = integrator(A_func_bound, t, dt, y)
-        y_half = integrator(A_func_bound, t, dt_half, y)
-        y_small = integrator(A_func_bound, t + dt_half, dt_half, y_half)
+        y_big, _ = integrator(A_func_bound, t, dt, y)
+        y_half, A_nodes_half = integrator(A_func_bound, t, dt_half, y)
+        y_small, A_nodes_step = integrator(A_func_bound, t + dt_half, dt_half, y_half)
 
-        # Unified error control and step size adjustment
         err = torch.norm(y_small - y_big, dim=-1)
         tol = atol + rtol * torch.norm(y_small, dim=-1)
         accept_step = torch.all(err <= tol)
 
         if accept_step or abs(dt) < 1e-12:
-            t += dt
             y = y_small
             if return_traj or dense_output:
-                ts.append(t)
-                ys.append(y)
+                ts.append(t+dt_half)
+                ys.append(y_half)
+                ts.append(t+dt)
+                ys.append(y_small)
+                if dense_output:
+                    A_nodes_traj.append(A_nodes_half)
+                    A_nodes_traj.append(A_nodes_step)
+            t += dt
 
         safety, fac_min, fac_max = 0.9, 0.2, 5.0
         
@@ -386,22 +467,28 @@ def magnus_solve(
         
         step_cnt += 1
 
-    if return_traj:
-        ys, ts = torch.stack(ys, dim=-2), torch.tensor(ts)
-        return ys, ts
 
-    if dense_output:
-        ys, ts = torch.stack(ys, dim=-2), torch.tensor(ts)
-        return DenseOutput(ys, ts, order, A_func_bound)
-    
+    if return_traj or dense_output:
+        ys_out = torch.stack(ys, dim=-2)
+        ts_out = torch.tensor(ts, device=y0.device, dtype=y0.dtype)
+        if return_traj:
+            return ys_out, ts_out
+
+        if dense_output:
+            if dense_output_method == 'collocation':
+                A_nodes_out = torch.stack(A_nodes_traj, dim=-3)
+                return CollocationDenseOutput(ys_out, ts_out, A_nodes_out, order)
+            else:
+                return DenseOutputNaive(ys_out, ts_out, order, A_func_bound)
     return y
 
 def magnus_odeint(
     A_func_or_module: Union[Callable, nn.Module], y0: Tensor, t: Union[Sequence[float], torch.Tensor],
     params: Tensor = None,
     order: int = 4, rtol: float = 1e-6, atol: float = 1e-8,
-    dense_output: bool = False
-) -> Union[Tensor, DenseOutput]:
+    dense_output: bool = False,
+    dense_output_method: str = 'naive'
+) -> Union[Tensor, DenseOutputNaive, CollocationDenseOutput]:
     """
     Solve linear ODE system at specified time points using Magnus integrator.
     
@@ -430,7 +517,7 @@ def magnus_odeint(
     if dense_output:
         return magnus_solve(
             y0, (t_vec[0], t_vec[-1]), functional_A_func, p_dict, 
-            order, rtol, atol, dense_output=True
+            order, rtol, atol, dense_output=True, dense_output_method=dense_output_method
         )
     else:
         ys_out = [y0]

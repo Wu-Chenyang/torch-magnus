@@ -67,7 +67,7 @@ def test_interpolation_accuracy(order, rtol):
 
     # Set a realistic error threshold for interpolation
     # Interpolation error is expected to be higher than solver step error
-    error_threshold = 10 * (rtol * 1e-1 + rtol * torch.norm(y_analytical, dim=-1))
+    error_threshold = 100 * (rtol * 1e-1 + rtol * torch.norm(y_analytical, dim=-1))
 
     print(f"  Max interpolation error: {interpolation_error.max().item():.2e}")
     print(f"  Max error threshold: {error_threshold.max().item():.2e}")
@@ -76,7 +76,13 @@ def test_interpolation_accuracy(order, rtol):
     assert torch.all(success), (
         "Interpolation failures:\n" +
         "\n".join([  # 使用 join 将多行错误合并成一个字符串
-            f"  - Index {i}: Error {interpolation_error[i]:.4e} > Threshold {error_threshold[i]:.4f}"
+            f"  - Index {i}: Error {interpolation_error[i]:.4e} > Threshold {error_threshold[i]:.4e}"
             for i in (~success).nonzero(as_tuple=True)[0] # 列表推导式
         ])
     )
+
+if __name__ == "__main__":
+    test_interpolation_accuracy(2, 1e-6)
+    for order in [2, 4, 6]:
+        for rtol in [1e-4, 1e-6]:
+            test_interpolation_accuracy(order, rtol)

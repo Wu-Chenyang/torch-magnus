@@ -432,10 +432,11 @@ def test_tolerance_settings(order):
     # 1. 定义一个高度振荡的系统
     w0, w1, w2 = 10.0, 5.0, 20.0
     def A_func(t, params=None):
-        wt = w0 + w1 * math.cos(w2 * t)
-        A = torch.zeros((2, 2), dtype=torch.float64)
-        A[0, 1] = wt
-        A[1, 0] = -wt
+        t = torch.as_tensor(t)
+        wt = w0 + w1 * torch.cos(w2 * t)
+        A = torch.zeros(t.shape + (2, 2), dtype=torch.float64)
+        A[..., 0, 1] = wt
+        A[..., 1, 0] = -wt
         return A
 
     y0 = torch.tensor([1.0, 0.0], dtype=torch.float64)

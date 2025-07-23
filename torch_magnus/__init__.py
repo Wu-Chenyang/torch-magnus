@@ -20,7 +20,9 @@ from .solvers import (
     magnus_solve,
     Magnus2nd,
     Magnus4th,
-    DenseOutput,
+    Magnus6th,
+    DenseOutputNaive,
+    CollocationDenseOutput,
 )
 
 __all__ = [
@@ -29,5 +31,7 @@ __all__ = [
     "magnus_solve",
     "Magnus2nd",
     "Magnus4th",
-    "DenseOutput",
+    "Magnus6th",
+    "DenseOutputNaive",
+    "CollocationDenseOutput",
 ]
