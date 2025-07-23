@@ -206,6 +206,143 @@ class Magnus6th(BaseStepper):
         
         return y_next, torch.stack((A1, A2, A3), dim=0)
 
+
+# -----------------------------------------------------------------------------
+# Gauss-Legendre Runge-Kutta (GLRK) Single-Step Integrators
+# -----------------------------------------------------------------------------
+
+class GLRK2nd(BaseStepper):
+    """Second-order implicit Gauss-Legendre Runge-Kutta integrator."""
+    order = 2
+    c = 0.5
+    a = 0.5
+    b = 1.0
+
+    def forward(self, A: Callable[..., Tensor], t0: Union[Sequence[float], torch.Tensor, float], h: Union[Sequence[float], torch.Tensor, float], y0: Tensor) -> Tuple[Tensor, Tuple[Tensor, ...]]:
+        t0 = torch.as_tensor(t0, device=y0.device, dtype=y0.dtype)
+        h_tensor = torch.as_tensor(h, device=y0.device, dtype=y0.dtype)
+        
+        t1 = t0 + self.c * h_tensor
+        A1 = A(t1)
+
+        *batch_shape, d = y0.shape
+        I_d = torch.eye(d, device=y0.device, dtype=y0.dtype)
+
+        h_exp = h_tensor
+        while h_exp.ndim < A1.ndim:
+            h_exp = h_exp.unsqueeze(-1)
+
+        L = I_d - h_exp * self.a * A1
+        R = _apply_matrix(A1, y0)
+        
+        k1 = torch.linalg.solve(L, R.unsqueeze(-1)).squeeze(-1)
+
+        y_next = y0 + h_tensor.unsqueeze(-1) * self.b * k1
+        
+        return y_next, A1.unsqueeze(0)
+
+
+class GLRK4th(BaseStepper):
+    """Fourth-order implicit Gauss-Legendre Runge-Kutta integrator."""
+    order = 4
+    _sqrt3 = math.sqrt(3.0)
+    c1, c2 = 0.5 - _sqrt3 / 6, 0.5 + _sqrt3 / 6
+    a11, a12 = 1.0/4.0, 1.0/4.0 - _sqrt3 / 6.0
+    a21, a22 = 1.0/4.0 + _sqrt3 / 6.0, 1.0/4.0
+    b1, b2 = 0.5, 0.5
+
+    def forward(self, A: Callable[..., Tensor], t0: Union[Sequence[float], torch.Tensor, float], h: Union[Sequence[float], torch.Tensor, float], y0: Tensor) -> Tuple[Tensor, Tuple[Tensor, ...]]:
+        t0 = torch.as_tensor(t0, device=y0.device, dtype=y0.dtype)
+        h_tensor = torch.as_tensor(h, device=y0.device, dtype=y0.dtype)
+        
+        t1, t2 = t0 + self.c1 * h_tensor, t0 + self.c2 * h_tensor
+        
+        A12 = A(torch.cat([t1.view(-1), t2.view(-1)]))
+        A1, A2 = A12.split(t1.numel(), dim=-3)
+        if t1.ndim == 0:
+            A1, A2 = A1.squeeze(-3), A2.squeeze(-3)
+
+        *batch_shape, d = y0.shape
+        I_d = torch.eye(d, device=y0.device, dtype=y0.dtype)
+        
+        h_exp = h_tensor
+        while h_exp.ndim < A1.ndim:
+            h_exp = h_exp.unsqueeze(-1)
+
+        L = torch.zeros(*A1.shape[:-2], 2 * d, 2 * d, device=y0.device, dtype=y0.dtype)
+        L[..., :d, :d] = I_d - h_exp * self.a11 * A1
+        L[..., :d, d:] = -h_exp * self.a12 * A1
+        L[..., d:, :d] = -h_exp * self.a21 * A2
+        L[..., d:, d:] = I_d - h_exp * self.a22 * A2
+
+        R1 = _apply_matrix(A1, y0)
+        R2 = _apply_matrix(A2, y0)
+        R = torch.cat([R1, R2], dim=-1)
+
+        K_flat = torch.linalg.solve(L, R)
+        k1, k2 = K_flat[..., :d], K_flat[..., d:]
+
+        y_next = y0 + h_tensor.unsqueeze(-1) * (self.b1 * k1 + self.b2 * k2)
+        
+        return y_next, torch.stack((A1, A2), dim=0)
+
+
+class GLRK6th(BaseStepper):
+    """Sixth-order implicit Gauss-Legendre Runge-Kutta integrator."""
+    order = 6
+    _sqrt15 = math.sqrt(15.0)
+    c1, c2, c3 = 0.5 - _sqrt15 / 10, 0.5, 0.5 + _sqrt15 / 10
+    
+    a11, a12, a13 = 5.0/36.0, 2.0/9.0 - _sqrt15/15.0, 5.0/36.0 - _sqrt15/30.0
+    a21, a22, a23 = 5.0/36.0 + _sqrt15/24.0, 2.0/9.0, 5.0/36.0 - _sqrt15/24.0
+    a31, a32, a33 = 5.0/36.0 + _sqrt15/30.0, 2.0/9.0 + _sqrt15/15.0, 5.0/36.0
+    
+    b1, b2, b3 = 5.0/18.0, 4.0/9.0, 5.0/18.0
+
+    def forward(self, A: Callable[..., Tensor], t0: Union[Sequence[float], torch.Tensor, float], h: Union[Sequence[float], torch.Tensor, float], y0: Tensor) -> Tuple[Tensor, Tuple[Tensor, ...]]:
+        t0 = torch.as_tensor(t0, device=y0.device, dtype=y0.dtype)
+        h_tensor = torch.as_tensor(h, device=y0.device, dtype=y0.dtype)
+        
+        t1, t2, t3 = t0 + self.c1 * h_tensor, t0 + self.c2 * h_tensor, t0 + self.c3 * h_tensor
+        
+        A123 = A(torch.cat([t1.view(-1), t2.view(-1), t3.view(-1)]))
+        A1, A2, A3 = A123.split(t1.numel(), dim=-3)
+        if t1.ndim == 0:
+            A1, A2, A3 = A1.squeeze(-3), A2.squeeze(-3), A3.squeeze(-3)
+
+        *batch_shape, d = y0.shape
+        I_d = torch.eye(d, device=y0.device, dtype=y0.dtype)
+        
+        h_exp = h_tensor
+        while h_exp.ndim < A1.ndim:
+            h_exp = h_exp.unsqueeze(-1)
+
+        L = torch.zeros(*A1.shape[:-2], 3 * d, 3 * d, device=y0.device, dtype=y0.dtype)
+        # Row 1
+        L[..., :d, :d] = I_d - h_exp * self.a11 * A1
+        L[..., :d, d:2*d] = -h_exp * self.a12 * A1
+        L[..., :d, 2*d:] = -h_exp * self.a13 * A1
+        # Row 2
+        L[..., d:2*d, :d] = -h_exp * self.a21 * A2
+        L[..., d:2*d, d:2*d] = I_d - h_exp * self.a22 * A2
+        L[..., d:2*d, 2*d:] = -h_exp * self.a23 * A2
+        # Row 3
+        L[..., 2*d:, :d] = -h_exp * self.a31 * A3
+        L[..., 2*d:, d:2*d] = -h_exp * self.a32 * A3
+        L[..., 2*d:, 2*d:] = I_d - h_exp * self.a33 * A3
+
+        R1 = _apply_matrix(A1, y0)
+        R2 = _apply_matrix(A2, y0)
+        R3 = _apply_matrix(A3, y0)
+        R = torch.cat([R1, R2, R3], dim=-1)
+
+        K_flat = torch.linalg.solve(L, R)
+        k1, k2, k3 = K_flat[..., :d], K_flat[..., d:2*d], K_flat[..., 2*d:]
+
+        y_next = y0 + h_tensor.unsqueeze(-1) * (self.b1 * k1 + self.b2 * k2 + self.b3 * k3)
+        
+        return y_next, torch.stack((A1, A2, A3), dim=0)
+
 # -----------------------------------------------------------------------------
 # Adaptive Stepping
 # -----------------------------------------------------------------------------
@@ -421,7 +558,7 @@ class CollocationDenseOutput:
 def adaptive_ode_solve(
     y0: Tensor, t_span: TimeSpan, 
     functional_A_func: Callable, p_dict: Dict[str, Tensor],
-    order: int = 4, rtol: float = 1e-6, atol: float = 1e-8, 
+    method: str = 'magnus', order: int = 4, rtol: float = 1e-6, atol: float = 1e-8, 
     return_traj: bool = False, dense_output: bool = False, 
     max_steps: int = 10_000, dense_output_method: str = 'naive',
 
@@ -436,7 +573,8 @@ def adaptive_ode_solve(
         t_span: Integration interval (t0, t1)
         functional_A_func: Matrix function A(t, params) returning (*batch_shape, *time_shape, dim, dim)
         p_dict: Parameter dictionary
-        order: Magnus integrator order (2, 4, or 6)
+        method: Integration method ('magnus' or 'glrk')
+        order: Integrator order (2, 4, or 6)
         rtol: Relative tolerance for adaptive stepping
         atol: Absolute tolerance for adaptive stepping
         return_traj: If True, return trajectory at all time steps
@@ -449,10 +587,18 @@ def adaptive_ode_solve(
         If dense_output=True: DenseOutput object
         Otherwise: Final solution of shape (*batch_shape, dim)
     """
-    if order == 2: integrator = Magnus2nd()
-    elif order == 4: integrator = Magnus4th()
-    elif order == 6: integrator = Magnus6th()
-    else: raise ValueError("order must be 2, 4, or 6")
+    if method == 'magnus':
+        if order == 2: integrator = Magnus2nd()
+        elif order == 4: integrator = Magnus4th()
+        elif order == 6: integrator = Magnus6th()
+        else: raise ValueError(f"Invalid order {order} for Magnus method")
+    elif method == 'glrk':
+        if order == 2: integrator = GLRK2nd()
+        elif order == 4: integrator = GLRK4th()
+        elif order == 6: integrator = GLRK6th()
+        else: raise ValueError(f"Invalid order {order} for GLRK method")
+    else:
+        raise ValueError(f"Unknown integration method: {method}")
 
     # Bind p_dict to A_func
     A_func_bound = lambda tau: functional_A_func(tau, p_dict)
@@ -522,7 +668,7 @@ def adaptive_ode_solve(
 def odeint(
     A_func_or_module: Union[Callable, nn.Module], y0: Tensor, t: Union[Sequence[float], torch.Tensor],
     params: Tensor = None,
-    order: int = 4, rtol: float = 1e-6, atol: float = 1e-8,
+    method: str = 'magnus', order: int = 4, rtol: float = 1e-6, atol: float = 1e-8,
     dense_output: bool = False,
     dense_output_method: str = 'naive'
 ) -> Union[Tensor, DenseOutputNaive, CollocationDenseOutput]:
@@ -535,7 +681,8 @@ def odeint(
         t: Time points of shape (N,). If dense_output is True, only the first and
            last time points are used to define the integration interval.
         params: Parameter tensor (for callable interface) or None
-        order: Magnus integrator order (2, 4, or 6)
+        method: Integration method ('magnus' or 'glrk')
+        order: Integrator order (2, 4, or 6)
         rtol: Relative tolerance
         atol: Absolute tolerance
         dense_output: If True, return a `DenseOutput` object for interpolation.
@@ -554,14 +701,14 @@ def odeint(
     if dense_output:
         return adaptive_ode_solve(
             y0, (t_vec[0], t_vec[-1]), functional_A_func, p_dict, 
-            order, rtol, atol, dense_output=True, dense_output_method=dense_output_method
+            method, order, rtol, atol, dense_output=True, dense_output_method=dense_output_method
         )
     else:
         ys_out = [y0]
         y_curr = y0
         for i in range(len(t_vec) - 1):
             t0, t1 = float(t_vec[i]), float(t_vec[i + 1])
-            y_next = adaptive_ode_solve(y_curr, (t0, t1), functional_A_func, p_dict, order, rtol, atol)
+            y_next = adaptive_ode_solve(y_curr, (t0, t1), functional_A_func, p_dict, method, order, rtol, atol)
             ys_out.append(y_next)
             y_curr = y_next
         return torch.stack(ys_out, dim=-2)
@@ -760,7 +907,7 @@ class _MagnusAdjoint(torch.autograd.Function):
     """Magnus integrator with memory-efficient adjoint gradient computation."""
     
     @staticmethod
-    def forward(ctx, y0, t, functional_A_func, param_keys, order, rtol, atol, quad_method, quad_options, *param_values):
+    def forward(ctx, y0, t, functional_A_func, param_keys, method, order, rtol, atol, quad_method, quad_options, *param_values):
         """
         Forward pass: integrate ODE and save context for backward pass.
         
@@ -786,14 +933,14 @@ class _MagnusAdjoint(torch.autograd.Function):
         with torch.no_grad():
             y_dense_traj = adaptive_ode_solve(
                 y0, (t[0], t[-1]), functional_A_func, params_and_buffers_dict, 
-                order=order, rtol=rtol, atol=atol, dense_output=True
+                method=method, order=order, rtol=rtol, atol=atol, dense_output=True
             )
             y_traj = y_dense_traj(t)
 
         # Save context for the backward pass
         ctx.functional_A_func = functional_A_func
         ctx.param_keys = param_keys
-        ctx.order, ctx.rtol, ctx.atol = order, rtol, atol
+        ctx.method, ctx.order, ctx.rtol, ctx.atol = method, order, rtol, atol
         ctx.quad_method, ctx.quad_options = quad_method, quad_options
         ctx.y0_requires_grad = y0.requires_grad
         ctx.y_dense_traj = y_dense_traj
@@ -823,7 +970,7 @@ class _MagnusAdjoint(torch.autograd.Function):
         # Unpack non-tensor context
         functional_A_func = ctx.functional_A_func
         param_keys = ctx.param_keys
-        order, rtol, atol = ctx.order, ctx.rtol, ctx.atol
+        method, order, rtol, atol = ctx.method, ctx.order, ctx.rtol, ctx.atol
         quad_method, quad_options = ctx.quad_method, ctx.quad_options
 
         # Reconstruct dictionaries
@@ -862,7 +1009,7 @@ class _MagnusAdjoint(torch.autograd.Function):
             with torch.no_grad():
                 a_dense_traj = adaptive_ode_solve(
                     adj_y, (t_i, t_prev), neg_trans_A_func, full_p_dict_for_solve, 
-                    order=order, rtol=rtol, atol=atol, dense_output=True
+                    method=method, order=order, rtol=rtol, atol=atol, dense_output=True
                 )
 
             def A_func_for_quadrature(t_val, p_dict_req):
@@ -891,6 +1038,7 @@ class _MagnusAdjoint(torch.autograd.Function):
             None,                 # grad for t
             None,                 # grad for functional_A_func
             None,                 # grad for param_keys
+            None,                 # grad for method
             None,                 # grad for order
             None,                 # grad for rtol
             None,                 # grad for atol
@@ -906,7 +1054,7 @@ class _MagnusAdjoint(torch.autograd.Function):
 def odeint_adjoint(
     A_func_or_module: Union[Callable, nn.Module], y0: Tensor, t: Union[Sequence[float], torch.Tensor],
     params: Tensor = None,
-    order: int = 4, rtol: float = 1e-6, atol: float = 1e-8,
+    method: str = 'magnus', order: int = 4, rtol: float = 1e-6, atol: float = 1e-8,
     quad_method: str = 'gk', quad_options: dict = None
 ) -> Tensor:
     """
@@ -948,7 +1096,7 @@ def odeint_adjoint(
     return _MagnusAdjoint.apply(
         y0, t_vec, 
         functional_A_func, 
-        param_keys, order, rtol, atol, 
+        param_keys, method, order, rtol, atol, 
         quad_method, quad_options,
         *param_values  # unpack the tensors here
     )

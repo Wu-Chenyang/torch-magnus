@@ -8,8 +8,9 @@ import matplotlib.pyplot as plt
 import pytest
 
 
+@pytest.mark.parametrize("method", ["magnus", "glrk"])
 @pytest.mark.parametrize("order", [2, 4, 6])
-def test_exponential_system(order):
+def test_exponential_system(method, order):
     """测试指数系统: y' = diag(p1, p2) * y"""
     
     def A_func(t, params: torch.Tensor) -> torch.Tensor:
@@ -28,7 +29,7 @@ def test_exponential_system(order):
     t = torch.tensor([0.0, T], dtype=torch.float64)
     
     # Magnus求解
-    y_traj = odeint_adjoint(A_func, y0, t, params, order=order, rtol=1e-6, atol=1e-8)
+    y_traj = odeint_adjoint(A_func, y0, t, params, method=method, order=order, rtol=1e-6, atol=1e-8)
     
     # 解析解: y(T) = [exp(p1*T), 2*exp(p2*T)]
     y_analytical = torch.tensor([
@@ -62,8 +63,9 @@ def test_exponential_system(order):
     assert success
 
 
+@pytest.mark.parametrize("method", ["magnus", "glrk"])
 @pytest.mark.parametrize("order", [2, 4, 6])
-def test_harmonic_oscillator(order):
+def test_harmonic_oscillator(method, order):
     """测试谐振子: y'' + ω²y = 0 """
     
     def A_func(t, params: torch.Tensor) -> torch.Tensor:
@@ -83,7 +85,7 @@ def test_harmonic_oscillator(order):
     t = torch.tensor([0.0, T], dtype=torch.float64)
     
     # Magnus求解
-    y_traj = odeint_adjoint(A_func, y0, t, params, order=order, rtol=1e-6, atol=1e-8)
+    y_traj = odeint_adjoint(A_func, y0, t, params, method=method, order=order, rtol=1e-6, atol=1e-8)
     
         # 解析解: y(T) = [cos(ωT), -ω*sin(ωT)]
     y_analytical = torch.tensor([
@@ -130,8 +132,9 @@ def test_harmonic_oscillator(order):
     assert success
 
 
+@pytest.mark.parametrize("method", ["magnus", "glrk"])
 @pytest.mark.parametrize("order", [2, 4, 6])
-def test_rotation_matrix(order):
+def test_rotation_matrix(method, order):
     """测试旋转矩阵: A = [[0, ω], [-ω, 0]]"""
     
     def A_func(t, params: torch.Tensor) -> torch.Tensor:
@@ -151,7 +154,7 @@ def test_rotation_matrix(order):
     t = torch.tensor([0.0, T], dtype=torch.float64)
     
     # Magnus求解
-    y_traj = odeint_adjoint(A_func, y0, t, params, order=order, rtol=1e-6, atol=1e-8)
+    y_traj = odeint_adjoint(A_func, y0, t, params, method=method, order=order, rtol=1e-6, atol=1e-8)
     
     # 解析解: y(T) = [cos(ωT), -sin(ωT)]
     y_analytical = torch.tensor([
@@ -182,8 +185,9 @@ def test_rotation_matrix(order):
     assert success
 
 
+@pytest.mark.parametrize("method", ["magnus", "glrk"])
 @pytest.mark.parametrize("order", [2, 4, 6])
-def test_challenging_highly_oscillatory_system(order):
+def test_challenging_highly_oscillatory_system(method, order):
     """测试一个具有非零梯度的挑战性高度振荡系统"""
     
     def A_func(t, params: torch.Tensor) -> torch.Tensor:
@@ -207,7 +211,7 @@ def test_challenging_highly_oscillatory_system(order):
     t = torch.tensor([0.0, T], dtype=torch.float64)
 
     # Magnus求解
-    y_traj = odeint_adjoint(A_func, y0, t, params, order=order, rtol=1e-6, atol=1e-8)
+    y_traj = odeint_adjoint(A_func, y0, t, params, method=method, order=order, rtol=1e-6, atol=1e-8)
 
     # 解析解
     if w2 == 0:
@@ -260,8 +264,9 @@ def test_challenging_highly_oscillatory_system(order):
     assert success
 
 
+@pytest.mark.parametrize("method", ["magnus", "glrk"])
 @pytest.mark.parametrize("order", [2, 4, 6])
-def test_against_torchdiffeq(order):
+def test_against_torchdiffeq(method, order):
     """与torchdiffeq比较(如果可用)"""
     
     try:
@@ -297,7 +302,7 @@ def test_against_torchdiffeq(order):
             return A
         
         params_magnus = params.clone().detach().requires_grad_(True)
-        y_magnus = odeint_adjoint(A_func, y0, t, params_magnus, order=order, rtol=1e-6, atol=1e-8)
+        y_magnus = odeint_adjoint(A_func, y0, t, params_magnus, method=method, order=order, rtol=1e-6, atol=1e-8)
         loss_magnus = torch.sum(y_magnus[-1]**2)
         grad_magnus = torch.autograd.grad(loss_magnus, params_magnus)[0]
         
@@ -413,8 +418,9 @@ def test_order_consistency():
     assert True
 
 
+@pytest.mark.parametrize("method", ["magnus", "glrk"])
 @pytest.mark.parametrize("order", [2, 4, 6])
-def test_tolerance_settings(order):
+def test_tolerance_settings(method, order):
     """
     设计一个完善的测试，检查求解器是否能够正确满足不同的容差设置。
     测试逻辑：
@@ -462,7 +468,7 @@ def test_tolerance_settings(order):
         # 3. 使用 odeint 进行求解
         y_final = odeint(
             A_func, y0, t_span, 
-            rtol=rtol, atol=atol, # 设置求解器的容差
+            method=method, rtol=rtol, atol=atol, # 设置求解器的容差
             order=order  # 使用4阶方法
         )[..., -1, :]
 
