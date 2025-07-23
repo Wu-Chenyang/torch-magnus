@@ -201,6 +201,42 @@ class Magnus6th(BaseMagnus):
         return y_next, torch.stack((A1, A2, A3), dim=0)
 
 # -----------------------------------------------------------------------------
+# Adaptive Stepping
+# -----------------------------------------------------------------------------
+def _richardson_step(integrator, A_func, t: float, dt: float, y):
+    """
+    Performs a step using Richardson extrapolation for adaptive step sizing.
+
+    This function computes the solution with one full step (y_big) and two 
+    half-steps (y_small). The difference is used to estimate the error and
+    a higher-order solution (y_next) for error control and dense output.
+
+    Args:
+        integrator: The Magnus integrator instance.
+        A_func: The matrix function A(t).
+        t: Current time.
+        dt: Current step size.
+        y: Current solution tensor.
+
+    Returns:
+        A tuple containing:
+        - y_next (Tensor): Higher-order solution estimate (extrapolated).
+        - err (Tensor): Norm of the estimated local error.
+        - A_nodes_step (Tensor): Matrix values at quadrature nodes for the full step.
+    """
+    dt_half = 0.5 * dt
+    y, A_nodes = integrator(A_func, t, torch.as_tensor([dt, dt_half], dtype=y.dtype, device=y.device), y.unsqueeze(-2))
+    y_big, y_half = y[..., 0, :], y[..., 1, :]
+    A_nodes_step = A_nodes[..., 0, :, :]
+    y_small, _ = integrator(A_func, t + dt_half, dt_half, y_half)
+    
+    # Richardson extrapolation for a higher-order solution and error estimation
+    y_extrap = y_small + (y_small - y_big) / (2**integrator.order - 1)
+    err = torch.norm(y_extrap - y_big, dim=-1)
+    
+    return y_extrap, err, A_nodes_step
+
+# -----------------------------------------------------------------------------
 # Dense Output (Continuous Extension)
 # -----------------------------------------------------------------------------
 
@@ -431,24 +467,19 @@ def magnus_solve(
         if (t + dt - t1) * dt > 0:
             dt = t1 - t
 
-        dt_half = 0.5 * dt
-        y_big, _ = integrator(A_func_bound, t, dt, y)
-        y_half, A_nodes_half = integrator(A_func_bound, t, dt_half, y)
-        y_small, A_nodes_step = integrator(A_func_bound, t + dt_half, dt_half, y_half)
+        y_next, err, A_nodes_step = _richardson_step(
+            integrator, A_func_bound, t, dt, y
+        )
 
-        err = torch.norm(y_small - y_big, dim=-1)
-        tol = atol + rtol * torch.norm(y_small, dim=-1)
+        tol = atol + rtol * torch.norm(y_next, dim=-1)
         accept_step = torch.all(err <= tol)
 
         if accept_step or abs(dt) < 1e-12:
-            y = y_small
+            y = y_next
             if return_traj or dense_output:
-                ts.append(t+dt_half)
-                ys.append(y_half)
                 ts.append(t+dt)
-                ys.append(y_small)
+                ys.append(y)
                 if dense_output:
-                    A_nodes_traj.append(A_nodes_half)
                     A_nodes_traj.append(A_nodes_step)
             t += dt
 
