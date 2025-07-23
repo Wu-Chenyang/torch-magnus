@@ -10,9 +10,10 @@ def main():
     def A_func(t, params):
         # This function can be as complex as needed.
         # It can be a simple function or a full torch.nn.Module.
-        A = torch.zeros(2, 2, dtype=torch.float64)
-        A[0, 1] = -t
-        A[1, 0] = t
+        t_tensor = torch.as_tensor(t, dtype=torch.float64)
+        A = torch.zeros(*t_tensor.shape, 2, 2, dtype=torch.float64)
+        A[..., 0, 1] = -t
+        A[..., 1, 0] = t
         return A
 
     # 2. Set initial conditions and time points
