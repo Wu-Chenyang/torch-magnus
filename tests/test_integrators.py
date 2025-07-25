@@ -37,7 +37,7 @@ def test_exponential_system(method, order):
         2 * math.exp(p2 * T)
     ], dtype=torch.float64)
     
-    print(f"  Magnus solution: {y_traj[-1].detach().numpy()}")
+    print(f"  {method} solution: {y_traj[-1].detach().numpy()}")
     print(f"  Analytical solution: {y_analytical.numpy()}")
     print(f"  Solution error: {torch.norm(y_traj[-1] - y_analytical).item():.2e}")
     
@@ -51,7 +51,7 @@ def test_exponential_system(method, order):
         2 * T * 4 * math.exp(2 * p2 * T)
     ], dtype=torch.float64)
     
-    print(f"  Magnus gradient: {grad_magnus.detach().numpy()}")
+    print(f"  {method} gradient: {grad_magnus.detach().numpy()}")
     print(f"  Analytical gradient: {grad_analytical.numpy()}")
     
     grad_error = torch.norm(grad_magnus - grad_analytical)
@@ -93,7 +93,7 @@ def test_harmonic_oscillator(method, order):
         -omega * math.sin(omega * T)
     ], dtype=torch.float64)
     
-    print(f"  Magnus solution: {y_traj[-1].detach().numpy()}")
+    print(f"  {method} solution: {y_traj[-1].detach().numpy()}")
     print(f"  Analytical solution: {y_analytical.numpy()}")
     print(f"  Solution error: {torch.norm(y_traj[-1] - y_analytical).item():.2e}")
     
@@ -111,7 +111,7 @@ def test_harmonic_oscillator(method, order):
     sin_T = math.sin(omega * T)
     grad_analytical = 2*omega*sin_T**2 + 2*T*sin_T*cos_T*(omega**2 - 1)
     
-    print(f"  Magnus gradient: {grad_magnus.detach().numpy()}")
+    print(f"  {method} gradient: {grad_magnus.detach().numpy()}")
     print(f"  Analytical gradient: {grad_analytical}")
 
     grad_error = abs(grad_magnus.item() - grad_analytical)
@@ -162,7 +162,7 @@ def test_rotation_matrix(method, order):
         -math.sin(omega * T)
     ], dtype=torch.float64)
     
-    print(f"  Magnus solution: {y_traj[-1].detach().numpy()}")
+    print(f"  {method} solution: {y_traj[-1].detach().numpy()}")
     print(f"  Analytical solution: {y_analytical.numpy()}")
     print(f"  Solution error: {torch.norm(y_traj[-1] - y_analytical).item():.2e}")
     
@@ -173,7 +173,7 @@ def test_rotation_matrix(method, order):
     # 解析梯度: dL/dω = 0 (因为L=1是常数)
     grad_analytical = 0.0
     
-    print(f"  Magnus gradient: {grad_magnus.detach().numpy()}")
+    print(f"  {method} gradient: {grad_magnus.detach().numpy()}")
     print(f"  Analytical gradient: {grad_analytical}")
     
     grad_error = abs(grad_magnus.item() - grad_analytical)
@@ -224,7 +224,7 @@ def test_challenging_highly_oscillatory_system(method, order):
         -math.sin(theta_T)
     ], dtype=torch.float64)
 
-    print(f"  Magnus solution: {y_traj[-1].detach().numpy()}")
+    print(f"  {method} solution: {y_traj[-1].detach().numpy()}")
     print(f"  Analytical solution: {y_analytical.numpy()}")
     sol_error = torch.norm(y_traj[-1] - y_analytical)
     print(f"  Solution error: {sol_error.item():.2e}")
@@ -252,7 +252,7 @@ def test_challenging_highly_oscillatory_system(method, order):
             (T**2 / 2) * exp_term * cos_theta_T
         ], dtype=torch.float64)
 
-    print(f"  Magnus gradient: {grad_magnus.detach().numpy()}")
+    print(f"  {method} gradient: {grad_magnus.detach().numpy()}")
     print(f"  Analytical gradient: {grad_analytical.numpy()}")
     
     grad_error = torch.norm(grad_magnus - grad_analytical)
@@ -484,7 +484,7 @@ def test_tolerance_settings(method, order):
         
         results.append({'tol': tolerance, 'error': error, 'passed': passed})
         status = "PASSED" if passed else "FAILED"
-        print(f"  Magnus O{order} | {tolerance:9.1e} | {error:11.2e}               | {status}")
+        print(f"  {method} O{order} | {tolerance:9.1e} | {error:11.2e}               | {status}")
 
     # 5a. 验证误差是否随着容差的减小而单调递减
     errors = [r['error'] for r in results]
