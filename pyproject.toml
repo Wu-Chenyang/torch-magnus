@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torch-linode"
-version = "0.2.0"
+version = "0.1.0"
 authors = [
   { name="Wu-Chenyang", email="wuchenyang@stu.pku.edu.cn" },
 ]
