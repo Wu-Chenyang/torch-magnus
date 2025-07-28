@@ -8,7 +8,7 @@ version = "0.1.0"
 authors = [
   { name="Wu-Chenyang", email="wucy@lamda.nju.edu.cn" },
 ]
-description = "A PyTorch-based library for batch solving homogeneous linear matrix ODEs."
+description = "A PyTorch-based library for solving homogeneous and non-homogeneous linear ODEs using Magnus-type integrators."
 readme = "README.md"
 requires-python = ">=3.8"
 classifiers = [

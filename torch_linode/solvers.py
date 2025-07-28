@@ -666,52 +666,117 @@ def adaptive_ode_solve(
     return y
 
 def odeint(
-    A_func_or_module: Union[Callable, nn.Module], y0: Tensor, t: Union[Sequence[float], torch.Tensor],
+    system_func_or_module: Union[Callable, nn.Module], y0: Tensor, t: Union[Sequence[float], torch.Tensor],
     params: Tensor = None,
     method: str = 'magnus', order: int = 4, rtol: float = 1e-6, atol: float = 1e-8,
     dense_output: bool = False,
     dense_output_method: str = 'naive'
 ) -> Union[Tensor, DenseOutputNaive, CollocationDenseOutput]:
     """
-    Solve linear ODE system at specified time points using Magnus integrator.
-    
+    Solve linear ODE system at specified time points.
+
+    This function solves initial value problems of the form:
+    dy/dt = A(t)y(t)  (homogeneous)
+    or
+    dy/dt = A(t)y(t) + g(t) (non-homogeneous)
+
+    The system type is determined by the return value of `system_func_or_module`.
+
     Args:
-        A_func_or_module: Either a callable A(t, params) or nn.Module
-        y0: Initial conditions of shape (*batch_shape, dim)
+        system_func_or_module: A callable or `torch.nn.Module` that defines the system.
+            - For homogeneous systems, it should return the matrix A(t) of shape
+              (*batch_shape, dim, dim).
+            - For non-homogeneous systems, it should return a tuple (A(t), g(t)), where
+              A(t) is the matrix and g(t) is the vector of shape (*batch_shape, dim).
+        y0: Initial conditions of shape (*batch_shape, dim).
         t: Time points of shape (N,). If dense_output is True, only the first and
            last time points are used to define the integration interval.
-        params: Parameter tensor (for callable interface) or None
-        method: Integration method ('magnus' or 'glrk')
-        order: Integrator order (2, 4, or 6)
-        rtol: Relative tolerance
-        atol: Absolute tolerance
+        params: Parameter tensor (for callable interface) or None.
+        method: Integration method ('magnus' or 'glrk').
+        order: Integrator order (2, 4, or 6).
+        rtol: Relative tolerance.
+        atol: Absolute tolerance.
         dense_output: If True, return a `DenseOutput` object for interpolation.
                       Otherwise, return a tensor with solutions at time points `t`.
-        
+        dense_output_method: Method for dense output ('naive' or 'collocation').
+
     Returns:
         If dense_output is False (default):
-            Solution trajectory of shape (*batch_shape, N, dim)
+            Solution trajectory of shape (*batch_shape, N, dim).
         If dense_output is True:
             A `DenseOutput` object capable of interpolating the solution.
     """
-    functional_A_func, p_dict = _prepare_functional_call(A_func_or_module, params)
-    
+    functional_system_func, p_dict = _prepare_functional_call(system_func_or_module, params)
     t_vec = torch.as_tensor(t, dtype=y0.dtype, device=y0.device)
 
+    # --- Probe system function to determine mode (homogeneous vs. non-homogeneous) ---
+    with torch.no_grad():
+        probe_result = functional_system_func(t_vec[0], p_dict)
+
+    if isinstance(probe_result, torch.Tensor):
+        is_nonhomogeneous = False
+        solver_func = functional_system_func
+        y_in = y0
+    elif isinstance(probe_result, tuple) and len(probe_result) == 2:
+        is_nonhomogeneous = True
+        A_probe, g_probe = probe_result
+        dim = y0.shape[-1]
+
+        # Validate shapes
+        if not (A_probe.ndim >= 2 and A_probe.shape[-2:] == (dim, dim)):
+            raise ValueError(f"Expected A(t) to have shape (..., {dim}, {dim}), but got {A_probe.shape}")
+        if not (g_probe.ndim >= 1 and g_probe.shape[-1] == dim):
+            raise ValueError(f"Expected g(t) to have shape (..., {dim}), but got {g_probe.shape}")
+
+        def augmented_B_func(t_val, p_dict_combined):
+            A_t, g_t = functional_system_func(t_val, p_dict_combined)
+            g_t = g_t.unsqueeze(-1)
+            *batch_dims, _, _ = A_t.shape
+            B_t = torch.zeros(*batch_dims, dim + 1, dim + 1, dtype=A_t.dtype, device=A_t.device)
+            B_t[..., :dim, :dim] = A_t
+            B_t[..., :dim, dim] = g_t.squeeze(-1)
+            return B_t
+        
+        solver_func = augmented_B_func
+        ones = torch.ones_like(y0[..., :1])
+        y_in = torch.cat([y0, ones], dim=-1)
+    else:
+        raise TypeError(
+            "system_func_or_module must return a Tensor (for homogeneous systems) "
+            f"or a Tuple[Tensor, Tensor] (for non-homogeneous systems), but got {type(probe_result)}"
+        )
+
+    # --- Solve the ODE ---
     if dense_output:
-        return adaptive_ode_solve(
-            y0, (t_vec[0], t_vec[-1]), functional_A_func, p_dict, 
+        solution = adaptive_ode_solve(
+            y_in, (t_vec[0], t_vec[-1]), solver_func, p_dict,
             method, order, rtol, atol, dense_output=True, dense_output_method=dense_output_method
         )
     else:
-        ys_out = [y0]
-        y_curr = y0
+        ys_out = [y_in]
+        y_curr = y_in
         for i in range(len(t_vec) - 1):
             t0, t1 = float(t_vec[i]), float(t_vec[i + 1])
-            y_next = adaptive_ode_solve(y_curr, (t0, t1), functional_A_func, p_dict, method, order, rtol, atol)
+            y_next = adaptive_ode_solve(y_curr, (t0, t1), solver_func, p_dict, method, order, rtol, atol)
             ys_out.append(y_next)
             y_curr = y_next
-        return torch.stack(ys_out, dim=-2)
+        solution = torch.stack(ys_out, dim=-2)
+
+    # --- Handle output slicing for non-homogeneous case ---
+    if is_nonhomogeneous:
+        if dense_output:
+            # Wrap the dense output object to slice the result on-the-fly
+            class _SlicedDenseOutput:
+                def __init__(self, dense_output_obj):
+                    self.dense_output_obj = dense_output_obj
+                def __call__(self, t_batch: Tensor) -> Tensor:
+                    Y_interp = self.dense_output_obj(t_batch)
+                    return Y_interp[..., :-1]
+            return _SlicedDenseOutput(solution)
+        else:
+            return solution[..., :-1]
+    else:
+        return solution
 
 # -----------------------------------------------------------------------------
 # Modular Integration Backends
@@ -720,21 +785,22 @@ def odeint(
 class BaseQuadrature(nn.Module):
     """Base class for quadrature integration methods."""
     
-    def forward(self, interp_func: Callable, functional_A_func: Callable, a: float, b: float, atol: float, rtol: float, params_req: Dict[str, Tensor]) -> Dict[str, Tensor]:
+    def forward(self, f_for_vjp: Callable, a_interp_func: Callable, a: float, b: float, atol: float, rtol: float, params_req: Dict[str, Tensor], is_nonhomogeneous: bool) -> Dict[str, Tensor]:
         """
         Integrate vector-Jacobian product over interval [a, b].
         
         Args:
-            interp_func: Interpolation function for trajectory
-            functional_A_func: Matrix function A(t, params)
-            a: Integration start time
-            b: Integration end time  
-            atol: Absolute tolerance
-            rtol: Relative tolerance
-            params_req: Dictionary of parameters requiring gradients
+            f_for_vjp: Function to compute the VJP target.
+            a_interp_func: Interpolation function for the adjoint state.
+            a: Integration start time.
+            b: Integration end time.
+            atol: Absolute tolerance.
+            rtol: Relative tolerance.
+            params_req: Dictionary of parameters requiring gradients.
+            is_nonhomogeneous: Flag indicating system type.
             
         Returns:
-            Dictionary of integrated gradients
+            Dictionary of integrated gradients.
         """
         raise NotImplementedError
 
@@ -766,58 +832,54 @@ class AdaptiveGaussKronrod(BaseQuadrature):
         cls._rule_cache[(dtype, device)] = rule
         return rule
 
-    def _eval_segment(self, y_interp_func, a_interp_func, functional_A_func, a, b, params_req, nodes, weights_k, weights_g):
+    def _eval_segment(self, f_for_vjp, a_interp_func, a, b, params_req, nodes, weights_k, weights_g, is_nonhomogeneous):
         """Evaluate integral over a single segment using Gauss-Kronrod rule."""
         h = (b - a) / 2.0
         c = (a + b) / 2.0
         segment_nodes = c + h * nodes
-        y_eval = y_interp_func(segment_nodes)
+        
+        # Get evaluations of the adjoint and the VJP target function
         a_eval = a_interp_func(segment_nodes)
+        
+        with torch.enable_grad():
+            vjp_target = f_for_vjp(segment_nodes, params_req)
+            _, vjp_fn = torch.func.vjp(lambda p: f_for_vjp(segment_nodes, p), params_req)
 
-        def f_batched_for_vjp(p_dict):
-            A_batch = functional_A_func(segment_nodes, p_dict)
-            return _apply_matrix(A_batch, y_eval)
+        # Prepare cotangents for VJP
+        if is_nonhomogeneous:
+            cotangent_K = (h * weights_k * a_eval, h * weights_k * a_eval)
+            cotangent_G = (h * weights_g * a_eval, h * weights_g * a_eval)
+        else:
+            cotangent_K = h * weights_k * a_eval
+            cotangent_G = h * weights_g * a_eval
 
-        _, vjp_fn = torch.func.vjp(f_batched_for_vjp, params_req)
-        cotangent_K = h * weights_k * a_eval
-        cotangent_G = h * weights_g * a_eval
         I_K = vjp_fn(cotangent_K)[0]
         I_G = vjp_fn(cotangent_G)[0]
         
-        # Calculate error for dictionary structure
         diff_dict = {k: I_K[k] - I_G[k] for k in I_K}
         error = math.sqrt(sum(v.square().sum().item() for v in diff_dict.values()))
         return I_K, error
 
-    def forward(self, y_interp_func: Callable, a_interp_func: Callable, functional_A_func: Callable, a: float, b: float, atol: float, rtol: float, params_req: Dict[str, Tensor], max_segments: int = 100) -> Dict[str, Tensor]:
-        """
-        Adaptive Gauss-Kronrod integration with error control.
-        
-        Args:
-            max_segments: Maximum number of adaptive subdivisions
-        """
+    def forward(self, f_for_vjp: Callable, a_interp_func: Callable, a: float, b: float, atol: float, rtol: float, params_req: Dict[str, Tensor], is_nonhomogeneous: bool, max_segments: int = 100) -> Dict[str, Tensor]:
+        """Adaptive Gauss-Kronrod integration with error control."""
         if a == b:
             return {k: torch.zeros_like(v) for k, v in params_req.items()}
 
-        # Get reference parameter's dtype and device
         ref_param = next(iter(params_req.values()))
         nodes, weights_k, weights_g = self._get_rule(ref_param.dtype, ref_param.device)
         
-        # Initialize integral values and error for dictionary structure
         I_total = {k: torch.zeros_like(v) for k, v in params_req.items()}
         E_total = 0.0
         
-        I_K, error = self._eval_segment(y_interp_func, a_interp_func, functional_A_func, a, b, params_req, nodes, weights_k, weights_g)
+        I_K, error = self._eval_segment(f_for_vjp, a_interp_func, a, b, params_req, nodes, weights_k, weights_g, is_nonhomogeneous)
         heap = [(-error, a, b, I_K, error)]
 
-        # Dictionary accumulation
         for k in I_total: I_total[k] += I_K[k]
         E_total += error
         
         machine_eps = torch.finfo(ref_param.dtype).eps
 
         while heap:
-            # Calculate total norm for dictionary structure
             I_total_norm = torch.sqrt(sum(v.square().sum() for v in I_total.values())).item()
             if E_total <= atol + rtol * I_total_norm:
                 break
@@ -833,8 +895,8 @@ class AdaptiveGaussKronrod(BaseQuadrature):
 
             mid = (a_parent + b_parent) / 2.0
 
-            I_K_left, err_left = self._eval_segment(y_interp_func, a_interp_func, functional_A_func, a_parent, mid, params_req, nodes, weights_k, weights_g)
-            I_K_right, err_right = self._eval_segment(y_interp_func, a_interp_func, functional_A_func, mid, b_parent, params_req, nodes, weights_k, weights_g)
+            I_K_left, err_left = self._eval_segment(f_for_vjp, a_interp_func, a_parent, mid, params_req, nodes, weights_k, weights_g, is_nonhomogeneous)
+            I_K_right, err_right = self._eval_segment(f_for_vjp, a_interp_func, mid, b_parent, params_req, nodes, weights_k, weights_g, is_nonhomogeneous)
 
             posterior_error = 0.0
             for k in I_total:
@@ -843,8 +905,8 @@ class AdaptiveGaussKronrod(BaseQuadrature):
                 posterior_error += diff.square().sum().item()
             posterior_error = math.sqrt(posterior_error)
 
-            refined_err_left = err_left * posterior_error / err_parent 
-            refined_err_right = err_right * posterior_error / err_parent 
+            refined_err_left = err_left * posterior_error / err_parent if err_parent > 0 else err_left
+            refined_err_right = err_right * posterior_error / err_parent if err_parent > 0 else err_right
 
             E_total += refined_err_left + refined_err_right - err_parent
 
@@ -870,7 +932,7 @@ class FixedSimpson(BaseQuadrature):
             N += 1
         self.N = N
 
-    def forward(self, y_interp_func: Callable, a_interp_func: Callable, functional_A_func: Callable, a: float, b: float, atol: float, rtol: float, params_req: Dict[str, Tensor]) -> Dict[str, Tensor]:
+    def forward(self, f_for_vjp: Callable, a_interp_func: Callable, a: float, b: float, atol: float, rtol: float, params_req: Dict[str, Tensor], is_nonhomogeneous: bool) -> Dict[str, Tensor]:
         """Fixed-step Simpson integration."""
         if a == b:
             return {k: torch.zeros_like(v) for k, v in params_req.items()}
@@ -879,22 +941,21 @@ class FixedSimpson(BaseQuadrature):
         nodes = torch.linspace(a, b, self.N + 1, device=ref_param.device, dtype=ref_param.dtype)
         h = (b - a) / self.N
 
-        y_eval = y_interp_func(nodes)
         a_eval = a_interp_func(nodes)
 
-        def f_batched_for_vjp(p_dict):
-            A_batch = functional_A_func(nodes, p_dict)
-            return _apply_matrix(A_batch, y_eval)
-
         with torch.enable_grad():
-            _, vjp_fn = torch.func.vjp(f_batched_for_vjp, params_req)
+            _, vjp_fn = torch.func.vjp(lambda p: f_for_vjp(nodes, p), params_req)
             
             weights = torch.ones(self.N + 1, device=a_eval.device, dtype=a_eval.dtype)
             weights[1:-1:2] = 4.0
             weights[2:-1:2] = 2.0
             weights *= (h / 3.0)
             
-            cotangent = weights.unsqueeze(1) * a_eval
+            if is_nonhomogeneous:
+                cotangent = (weights.unsqueeze(1) * a_eval, weights.unsqueeze(1) * a_eval)
+            else:
+                cotangent = weights.unsqueeze(1) * a_eval
+
             integral_dict = vjp_fn(cotangent)[0]
 
         return integral_dict
@@ -907,82 +968,83 @@ class _MagnusAdjoint(torch.autograd.Function):
     """Magnus integrator with memory-efficient adjoint gradient computation."""
     
     @staticmethod
-    def forward(ctx, y0, t, functional_A_func, param_keys, method, order, rtol, atol, quad_method, quad_options, *param_values):
-        """
-        Forward pass: integrate ODE and save context for backward pass.
-        
-        Args:
-            y0: Initial conditions of shape (*batch_shape, dim)
-            t: Time points of shape (N,)
-            functional_A_func: Matrix function A(t, params)
-            param_keys: List of parameter names
-            order: Magnus integrator order
-            rtol: Relative tolerance
-            atol: Absolute tolerance
-            quad_method: Quadrature method ('gk' or 'simpson')
-            quad_options: Quadrature options dictionary
-            *param_values: Unpacked parameter tensors
-            
-        Returns:
-            Solution trajectory of shape (*batch_shape, N, dim)
-        """
+    def forward(ctx, y0, t, functional_system_func, param_keys, method, order, rtol, atol, quad_method, quad_options, *param_values):
         # Reconstruct dictionary from unpacked arguments
         params_and_buffers_dict = dict(zip(param_keys, param_values))
         
         t = t.to(y0.dtype)
+
+        # --- Probe system function to determine mode ---
+        with torch.no_grad():
+            probe_result = functional_system_func(t[0], params_and_buffers_dict)
+
+        if isinstance(probe_result, torch.Tensor):
+            is_nonhomogeneous = False
+            solver_func = functional_system_func
+            y_in = y0
+        elif isinstance(probe_result, tuple) and len(probe_result) == 2:
+            is_nonhomogeneous = True
+            dim = y0.shape[-1]
+            
+            def augmented_B_func(t_val, p_dict_combined):
+                A_t, g_t = functional_system_func(t_val, p_dict_combined)
+                g_t = g_t.unsqueeze(-1)
+                *batch_dims, _, _ = A_t.shape
+                B_t = torch.zeros(*batch_dims, dim + 1, dim + 1, dtype=A_t.dtype, device=A_t.device)
+                B_t[..., :dim, :dim] = A_t
+                B_t[..., :dim, dim] = g_t.squeeze(-1)
+                return B_t
+            
+            solver_func = augmented_B_func
+            ones = torch.ones_like(y0[..., :1])
+            y_in = torch.cat([y0, ones], dim=-1)
+        else:
+            raise TypeError(f"System function must return a Tensor or a Tuple[Tensor, Tensor], but got {type(probe_result)}")
+
+        # --- Solve ODE and save context ---
         with torch.no_grad():
             y_dense_traj = adaptive_ode_solve(
-                y0, (t[0], t[-1]), functional_A_func, params_and_buffers_dict, 
+                y_in, (t[0], t[-1]), solver_func, params_and_buffers_dict, 
                 method=method, order=order, rtol=rtol, atol=atol, dense_output=True
             )
-            y_traj = y_dense_traj(t)
+            y_traj_maybe_aug = y_dense_traj(t)
 
-        # Save context for the backward pass
-        ctx.functional_A_func = functional_A_func
+        # --- Save context for backward pass ---
+        ctx.is_nonhomogeneous = is_nonhomogeneous
+        ctx.functional_system_func = functional_system_func # Save original user func
         ctx.param_keys = param_keys
         ctx.method, ctx.order, ctx.rtol, ctx.atol = method, order, rtol, atol
         ctx.quad_method, ctx.quad_options = quad_method, quad_options
         ctx.y0_requires_grad = y0.requires_grad
-        ctx.y_dense_traj = y_dense_traj
         
-        # Save all tensors that might be needed for gradient computation
+        # For backward, we need the augmented trajectory for y and the original for a
+        ctx.y_dense_traj_aug = y_dense_traj 
+        
         ctx.save_for_backward(t, *param_values)
         
-        return y_traj
+        return y_traj_maybe_aug[..., :-1] if is_nonhomogeneous else y_traj_maybe_aug
 
     @staticmethod
     def backward(ctx, grad_y_traj: Tensor):
-        """
-        Backward pass: compute gradients using adjoint sensitivity method.
-        
-        Args:
-            grad_y_traj: Gradient w.r.t. output trajectory of shape (*batch_shape, N, dim)
-            
-        Returns:
-            Tuple of gradients for all forward pass inputs
-        """
-        # Unpack saved tensors
-        saved_tensors = ctx.saved_tensors
-        y_dense_traj = ctx.y_dense_traj
-        t = saved_tensors[0]
-        param_values = saved_tensors[1:]
-        
-        # Unpack non-tensor context
-        functional_A_func = ctx.functional_A_func
+        # --- Unpack saved context ---
+        t, *param_values = ctx.saved_tensors
+        functional_system_func = ctx.functional_system_func
         param_keys = ctx.param_keys
         method, order, rtol, atol = ctx.method, ctx.order, ctx.rtol, ctx.atol
         quad_method, quad_options = ctx.quad_method, ctx.quad_options
+        is_nonhomogeneous = ctx.is_nonhomogeneous
+        y_dense_traj_aug = ctx.y_dense_traj_aug
 
-        # Reconstruct dictionaries
+        # --- Reconstruct parameter dictionaries ---
         full_p_and_b_dict = dict(zip(param_keys, param_values))
         params_req = {k: v for k, v in full_p_and_b_dict.items() if v.requires_grad}
         buffers_dict = {k: v for k, v in full_p_and_b_dict.items() if not v.requires_grad}
 
         if not params_req:
-            # If no parameters require gradients, no need to do any work
             num_params = len(param_values)
-            return (None,) * (9 + num_params)
+            return (None,) * (10 + num_params)
 
+        # --- Prepare for backward integration ---
         if quad_method == 'gk':
             quad_integrator = AdaptiveGaussKronrod()
         elif quad_method == 'simpson':
@@ -992,67 +1054,64 @@ class _MagnusAdjoint(torch.autograd.Function):
 
         T, dim = grad_y_traj.shape[-2], grad_y_traj.shape[-1]
         adj_y = grad_y_traj[..., -1, :].clone()
-        # Initialize the gradient dictionary
         adj_params = {k: torch.zeros_like(v) for k, v in params_req.items()}
-
         full_p_dict_for_solve = {**params_req, **buffers_dict}
+
+        # --- Define the backward dynamics function (Optimized) ---
         def neg_trans_A_func(t_val: Union[float, Tensor], p_and_b_dict: Dict) -> Tensor:
-            """
-            Creates a batch of matrices [-A^T] for solving.
-            """
-            A = functional_A_func(t_val, p_and_b_dict)
+            sys_out = functional_system_func(t_val, p_and_b_dict)
+            A = sys_out if not is_nonhomogeneous else sys_out[0]
             return -A.transpose(-1, -2)
-        
+
+        # --- Main backward loop ---
         for i in range(T - 1, 0, -1):
             t_i, t_prev = float(t[i]), float(t[i - 1])
 
+            # Solve the adjoint ODE backward in time (d-dimensional)
             with torch.no_grad():
                 a_dense_traj = adaptive_ode_solve(
                     adj_y, (t_i, t_prev), neg_trans_A_func, full_p_dict_for_solve, 
                     method=method, order=order, rtol=rtol, atol=atol, dense_output=True
                 )
 
-            def A_func_for_quadrature(t_val, p_dict_req):
+            # --- Define VJP target and cotangents for quadrature ---
+            def f_for_vjp(t_nodes, p_dict_req):
                 full_dict = {**p_dict_req, **buffers_dict}
-                return functional_A_func(t_val, full_dict)
+                y_eval_aug = y_dense_traj_aug(t_nodes)
+                y_eval = y_eval_aug[..., :-1] if is_nonhomogeneous else y_eval_aug
+                
+                sys_out = functional_system_func(t_nodes, full_dict)
+                if is_nonhomogeneous:
+                    A, g = sys_out
+                    return _apply_matrix(A, y_eval), g
+                else:
+                    return _apply_matrix(sys_out, y_eval)
+
+            # Update adjoint state for next segment
+            adj_y = a_dense_traj(t_prev)
+            adj_y.add_(grad_y_traj[..., i-1, :])
 
             integral_val_dict = quad_integrator(
-                y_dense_traj, a_dense_traj, A_func_for_quadrature, 
-                t_i, t_prev, atol, rtol, params_req=params_req
+                f_for_vjp, a_dense_traj, t_i, t_prev, atol, rtol, params_req, is_nonhomogeneous
             )
             
             for k in adj_params:
                 adj_params[k].sub_(integral_val_dict[k])
 
-            adj_y = a_dense_traj(t[i-1])
-            adj_y.add_(grad_y_traj[..., i-1, :])
-
-        grad_y0 = adj_y if ctx.y0_requires_grad else None
+        grad_y0 = adj_y
+        if not ctx.y0_requires_grad:
+            grad_y0 = None
         
-        # Build the tuple of gradients for *param_values
         grad_param_values = tuple(adj_params.get(key) for key in param_keys)
 
-        # The return tuple must match the inputs to forward()
-        return (
-            grad_y0,              # grad for y0
-            None,                 # grad for t
-            None,                 # grad for functional_A_func
-            None,                 # grad for param_keys
-            None,                 # grad for method
-            None,                 # grad for order
-            None,                 # grad for rtol
-            None,                 # grad for atol
-            None,                 # grad for quad_method
-            None,                 # grad for quad_options
-            *grad_param_values    # unpacked grads for *param_values
-        )
+        return (grad_y0, None, None, None, None, None, None, None, None, None, *grad_param_values)
 
 # -----------------------------------------------------------------------------
 # User-Friendly Interface
 # -----------------------------------------------------------------------------
 
 def odeint_adjoint(
-    A_func_or_module: Union[Callable, nn.Module], y0: Tensor, t: Union[Sequence[float], torch.Tensor],
+    system_func_or_module: Union[Callable, nn.Module], y0: Tensor, t: Union[Sequence[float], torch.Tensor],
     params: Tensor = None,
     method: str = 'magnus', order: int = 4, rtol: float = 1e-6, atol: float = 1e-8,
     quad_method: str = 'gk', quad_options: dict = None
@@ -1064,26 +1123,29 @@ def odeint_adjoint(
     sensitivity method for efficient gradient computation through the ODE solution.
     
     Args:
-        A_func_or_module: Either a callable A(t, params) returning (*batch_shape, *time_shape, dim, dim)
-                         or nn.Module
-        y0: Initial conditions of shape (*batch_shape, dim)
-        t: Time points of shape (N,)
-        params: Parameter tensor (for callable interface) or None
-        order: Magnus integrator order (2, 4, or 6)
-        rtol: Relative tolerance for integration
-        atol: Absolute tolerance for integration
-        quad_method: Quadrature method for adjoint integration ('gk' or 'simpson')
-        quad_options: Options dictionary for quadrature method
+        system_func_or_module: A callable or `torch.nn.Module` that defines the system.
+            - For homogeneous systems, it should return the matrix A(t) of shape
+              (*batch_shape, dim, dim).
+            - For non-homogeneous systems, it should return a tuple (A(t), g(t)), where
+              A(t) is the matrix and g(t) is the vector of shape (*batch_shape, dim).
+        y0: Initial conditions of shape (*batch_shape, dim).
+        t: Time points of shape (N,).
+        params: Parameter tensor (for callable interface) or None.
+        order: Magnus integrator order (2, 4, or 6).
+        rtol: Relative tolerance for integration.
+        atol: Absolute tolerance for integration.
+        quad_method: Quadrature method for adjoint integration ('gk' or 'simpson').
+        quad_options: Options dictionary for quadrature method.
         
     Returns:
-        Solution trajectory of shape (*batch_shape, N, dim)
+        Solution trajectory of shape (*batch_shape, N, dim).
     """
     t_vec = torch.as_tensor(t, dtype=y0.dtype, device=y0.device)
     if t_vec.ndim != 1 or t_vec.numel() < 2:
         raise ValueError("t must be 1-dimensional and contain at least two time points")
     
     # Prepare the functional form of A and the parameter dictionary
-    functional_A_func, p_and_b_dict = _prepare_functional_call(A_func_or_module, params)
+    functional_system_func, p_and_b_dict = _prepare_functional_call(system_func_or_module, params)
     
     if quad_options is None:
         quad_options = {}
@@ -1095,7 +1157,7 @@ def odeint_adjoint(
     # Pass all tensors and options as a flat list of arguments
     return _MagnusAdjoint.apply(
         y0, t_vec, 
-        functional_A_func, 
+        functional_system_func, 
         param_keys, method, order, rtol, atol, 
         quad_method, quad_options,
         *param_values  # unpack the tensors here

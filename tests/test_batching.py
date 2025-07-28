@@ -39,7 +39,7 @@ class TestMagnusSolver(unittest.TestCase):
         def A_func(t, params=None):
             A_base_dev = A_base.to(t.device if isinstance(t, torch.Tensor) else y0.device)
             if isinstance(t, float) or t.ndim == 0:
-                return A_base_dev * torch.sin(torch.tensor(t))
+                return A_base_dev * torch.sin(torch.as_tensor(t))
             elif t.ndim == 1:
                 sin_t = torch.sin(t).view(-1, 1, 1)
                 return A_base_dev.unsqueeze(-3) * sin_t

@@ -4,28 +4,29 @@
 [![Tests](https://github.com/Wu-Chenyang/torch-linode/actions/workflows/ci.yml/badge.svg)](https://github.com/Wu-Chenyang/torch-linode/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-`torch-linode` is a specialized PyTorch-based library for the efficient **batch solving of homogeneous linear ordinary differential equations (ODEs)** of the form `dy/dt = A(t)y`. It leverages Magnus-type integrators to provide high-precision, differentiable, and GPU-accelerated solutions.
+`torch-linode` is a specialized PyTorch-based library for the efficient **batch solving of homogeneous and non-homogeneous linear ordinary differential equations (ODEs)**. It solves systems of the form:
+- **Homogeneous**: `dy/dt = A(t)y(t)`
+- **Non-homogeneous**: `dy/dt = A(t)y(t) + g(t)`
 
-This library is particularly well-suited for problems in quantum mechanics, control theory, and other areas of physics and engineering where such ODEs are common.
+It leverages Magnus-type integrators to provide high-precision, differentiable, and GPU-accelerated solutions. This library is particularly well-suited for problems in quantum mechanics, control theory, and other areas of physics and engineering where such ODEs are common.
 
 ## Key Features
 
-- **Batch Processing**: Natively handles batches of initial conditions and parameters for massive parallelization. A single call can solve thousands of ODEs simultaneously.
-- **High-Order Integrators**: Includes 2nd and 4th-order Magnus integrators.
-- **Adaptive Stepping**: Automatically adjusts step size to meet specified error tolerances (`rtol`, `atol`), even across batches.
+- **Solves Homogeneous & Non-homogeneous Systems**: Unified API for both types of linear ODEs.
+- **Batch Processing**: Natively handles batches of initial conditions and parameters for massive parallelization.
+- **High-Order Integrators**: Includes 2nd, 4th, and 6th-order Magnus and Gauss-Legendre Runge-Kutta (GLRK) integrators.
+- **Adaptive Stepping**: Automatically adjusts step size to meet specified error tolerances (`rtol`, `atol`).
 - **Differentiable**: Gradients can be backpropagated through the solvers using a memory-efficient adjoint method.
-- **Dense Output**: Provides continuous solutions for evaluation at any time point within the integration interval.
-- **GPU Support**: Runs seamlessly on CUDA-enabled devices for significant performance gains.
+- **Dense Output**: Provides continuous solutions for evaluation at any time point.
+- **GPU Support**: Runs seamlessly on CUDA-enabled devices.
 
 ## Installation
-
-You can install the package directly from PyPI (once published):
 
 ```bash
 pip install torch-linode
 ```
 
-Or, for development, clone this repository and install in editable mode. **Note**: Use quotes around `.[dev]` to prevent shell expansion issues.
+Or, for development, clone this repository and install in editable mode:
 
 ```bash
 git clone https://github.com/Wu-Chenyang/torch-linode.git
@@ -35,113 +36,76 @@ pip install -e ".[dev]"
 
 ## API and Usage
 
-The primary functions are `odeint` and `odeint_adjoint`.
+The primary functions are `odeint` and `odeint_adjoint`. The solver automatically detects whether the system is homogeneous or non-homogeneous based on the return value of the system function.
 
 ```python
 odeint(
-    A_func_or_module: Union[Callable, nn.Module], 
+    system_func_or_module: Union[Callable, nn.Module], 
     y0: Tensor, 
     t: Union[Sequence[float], torch.Tensor],
     params: Tensor = None,
-    order: int = 4, 
-    rtol: float = 1e-6, 
-    atol: float = 1e-8
+    # ... other options
 ) -> Tensor
 ```
 
 ### Parameters
 
-- `A_func_or_module`: The function or `nn.Module` that defines the matrix `A(t)`.
-  - **As a function**: It should have the signature `A(t, params)`. For batch solving, it must return a tensor of shape `(*batch_shape, dim, dim)` when `t` is a scalar, and `(*batch_shape, num_times, dim, dim)` when `t` is a vector (as used internally by the adjoint method).
-  - **As an `nn.Module`**: The module's `forward` method should accept `t` as input. Parameters are handled automatically.
-- `y0`: A tensor of initial conditions with shape `(*batch_shape, dim)`. The `batch_shape` determines the number of ODEs to solve in parallel.
-- `t`: A 1D tensor or sequence of time points `(t_0, t_1, ..., t_N-1)` at which to evaluate the solution.
-- `params`: Optional tensor of parameters to be passed to `A_func`.
-- `order`: The order of the Magnus integrator to use (2 or 4).
-- `rtol`, `atol`: Relative and absolute tolerances for the adaptive step-size controller.
+- `system_func_or_module`: The function or `nn.Module` that defines the system.
+  - **For homogeneous systems (`dy/dt = Ay`)**: Return a single tensor `A(t)` of shape `(*batch_shape, dim, dim)`.
+  - **For non-homogeneous systems (`dy/dt = Ay + g`)**: Return a tuple `(A(t), g(t))`, where `g(t)` is a tensor of shape `(*batch_shape, dim)`.
+- `y0`: A tensor of initial conditions with shape `(*batch_shape, dim)`.
+- `t`: A 1D tensor or sequence of time points at which to evaluate the solution.
+- `params`: Optional tensor of parameters to be passed to the system function.
 
 ### Returns
 
-A tensor of shape `(*batch_shape, N, dim)` containing the solution trajectories for each ODE in the batch at each time point in `t`.
+A tensor of shape `(*batch_shape, N, dim)` containing the solution trajectories.
 
 ---
 
 `odeint_adjoint` has the same signature but uses a more memory-efficient method for computing gradients, making it ideal for training and optimization.
 
-## Example: Batch Solving and Parameter Learning
+## Example: Solving a Non-homogeneous ODE
 
-This example demonstrates how to solve a batch of ODEs simultaneously and use the adjoint method to learn the parameters of the system.
+This example solves `dy/dt = A(t)y + g(t)` where `A` is a constant rotation matrix and `g` is a time-dependent vector.
 
-The example models a batch of linear ODE systems of the form $y′(t)=A⋅y(t)$. The dynamics for each system in the batch are defined by a unique 2×2 matrix $A$. This matrix $A$ is generated by the matrix product of a single, shared, learnable 2×2 parameter matrix $W$ and a corresponding random 2×2 input matrix $B_i$ for that system (i.e., $A_i​=WB_i$​ for each system $i$ in the batch). The objective is to learn the shared matrix W from the observed trajectories.
 ```python
 import torch
-import torch.nn as nn
-from torch_linode import odeint, odeint_adjoint
+from torch_linode import odeint
+import numpy as np
 
+# 1. Define the non-homogeneous system
 dim = 2
-dtype = torch.float64
-batch_shape = (4, 2)
+A = torch.tensor([[0., 1.], [-1., 0.]], dtype=torch.float64)
 
-# Batch of initial conditions
-y0 = torch.randn(*batch_shape, dim, dtype=dtype)
-t_span = torch.linspace(0, 2 * torch.pi, 20, dtype=dtype)
-B = torch.randn(batch_shape + (2, 2), dtype=dtype)
-true_W = torch.randn(2, 2, dtype=dtype) * 0.1
-outputs = (true_W @ B.unsqueeze(-1)).squeeze(-1)
+def system_func(t, params):
+    # This function returns a tuple (A, g)
+    t_tensor = torch.as_tensor(t, dtype=torch.float64)
+    A_t = A.expand(*t_tensor.shape, dim, dim)
+    g_t = torch.stack([torch.sin(t_tensor), torch.cos(t_tensor)], dim=-1)
+    return A_t, g_t
 
-# Define the true system to generate target data
-with torch.no_grad():
-    def A_target_func(t, params):
-        t_tensor = torch.as_tensor(t, dtype=dtype).unsqueeze(-1).unsqueeze(-1)
-        if t_tensor.ndim == 3:
-            return torch.ones_like(t_tensor) * outputs.unsqueeze(-3)
-        else:
-            return torch.ones_like(t_tensor) * outputs
+# 2. Set initial conditions and time points
+y0 = torch.tensor([1.0, 0.0], dtype=torch.float64)
+t_span = torch.linspace(0, 2 * np.pi, 30, dtype=torch.float64)
 
-    y_target = odeint(A_target_func, y0, t_span)
-    y_target += torch.randn_like(y_target) * 0.1
+# 3. Call the solver
+solution = odeint(
+    system_func_or_module=system_func,
+    y0=y0,
+    t=t_span
+)
 
-# Create a learnable system
-W = nn.Parameter(torch.randn(2, 2, dtype=dtype) * 0.1 + true_W)
-
-def A_learnable_func(t, params):
-    t_tensor = torch.as_tensor(t, dtype=dtype).unsqueeze(-1).unsqueeze(-1)
-    outputs = (params @ B.unsqueeze(-1)).squeeze(-1)
-    if t_tensor.ndim == 3:
-        return torch.ones_like(t_tensor) * outputs.unsqueeze(-3)
-    else:
-        return torch.ones_like(t_tensor) * outputs
-
-# Set up the optimization loop
-optimizer = torch.optim.Adam([W], lr=1e-2)
-print("Starting parameter learning...")
-print(f"Target W: {true_W.numpy().tolist()}, Initial W: {W.detach().numpy().tolist()}")
-
-for i in range(300):
-    optimizer.zero_grad()  # Clear gradients
-    y_pred = odeint_adjoint(A_learnable_func, y0, t_span, params=W)
-    loss = torch.mean((y_pred - y_target).square())
-    loss.backward()
-    optimizer.step()
-
-    if i % 20 == 0:
-        print(f"Iter {i:03d} | Loss: {loss.item():.6f} | Learned W: {W.detach().numpy().tolist()}")
-
-print(f"\nFinal learned frequency: {W.detach().numpy().tolist()}")
+# 4. The exact solution is y(t) = [cos(t) + t*sin(t), -sin(t) + t*cos(t)]
+# The final point should be [1, 2*pi]
+print(f"Computed y(2pi): {solution[-1].numpy()}")
+# Expected: [1.         6.28318531]
 ```
-This example shows how the solver seamlessly handles inputs with a batch shape of (4, 2), solving all 8 systems (each with its own dynamics derived from $W$) and aggregating the loss for gradient-based optimization.
 
 ## Running Tests
 
-To run the test suite, first install the development dependencies. **Note**: Use quotes around `.[dev]` to prevent shell expansion issues.
-
 ```bash
 pip install -e ".[dev]"
-```
-
-Then, run pytest:
-
-```bash
 pytest
 ```
 
