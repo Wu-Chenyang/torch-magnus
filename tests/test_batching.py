@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import unittest
 import math
-from torch_magnus import odeint, odeint_adjoint, adaptive_ode_solve
+from torch_linode import odeint, odeint_adjoint, adaptive_ode_solve
 
 class LinearMatrixModule(nn.Module):
     """A simple nn.Module that defines a time-independent linear system."""

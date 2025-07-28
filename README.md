@@ -1,10 +1,10 @@
-# torch-magnus
+# torch-linode
 
-[![PyPI version](https://badge.fury.io/py/torch-magnus.svg)](https://badge.fury.io/py/torch-magnus)
-[![Tests](https://github.com/Wu-Chenyang/torch-magnus/actions/workflows/ci.yml/badge.svg)](https://github.com/Wu-Chenyang/torch-magnus/actions/workflows/ci.yml)
+[![PyPI version](https://badge.fury.io/py/torch-linode.svg)](https://badge.fury.io/py/torch-linode)
+[![Tests](https://github.com/Wu-Chenyang/torch-linode/actions/workflows/ci.yml/badge.svg)](https://github.com/Wu-Chenyang/torch-linode/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-`torch-magnus` is a specialized PyTorch-based library for the efficient **batch solving of homogeneous linear ordinary differential equations (ODEs)** of the form `dy/dt = A(t)y`. It leverages Magnus-type integrators to provide high-precision, differentiable, and GPU-accelerated solutions.
+`torch-linode` is a specialized PyTorch-based library for the efficient **batch solving of homogeneous linear ordinary differential equations (ODEs)** of the form `dy/dt = A(t)y`. It leverages Magnus-type integrators to provide high-precision, differentiable, and GPU-accelerated solutions.
 
 This library is particularly well-suited for problems in quantum mechanics, control theory, and other areas of physics and engineering where such ODEs are common.
 
@@ -22,14 +22,14 @@ This library is particularly well-suited for problems in quantum mechanics, cont
 You can install the package directly from PyPI (once published):
 
 ```bash
-pip install torch-magnus
+pip install torch-linode
 ```
 
 Or, for development, clone this repository and install in editable mode. **Note**: Use quotes around `.[dev]` to prevent shell expansion issues.
 
 ```bash
-git clone https://github.com/Wu-Chenyang/torch-magnus.git
-cd torch-magnus
+git clone https://github.com/Wu-Chenyang/torch-linode.git
+cd torch-linode
 pip install -e ".[dev]"
 ```
 
@@ -76,7 +76,7 @@ The example models a batch of linear ODE systems of the form $y′(t)=A⋅y(t)$.
 ```python
 import torch
 import torch.nn as nn
-from torch_magnus import odeint, odeint_adjoint
+from torch_linode import odeint, odeint_adjoint
 
 dim = 2
 dtype = torch.float64

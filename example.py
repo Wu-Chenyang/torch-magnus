@@ -1,5 +1,5 @@
 import torch
-from torch_magnus import odeint
+from torch_linode import odeint
 
 def main():
     """Example of solving a simple time-dependent ODE."""

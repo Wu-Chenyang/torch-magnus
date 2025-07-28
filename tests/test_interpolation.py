@@ -2,7 +2,7 @@ import torch
 import math
 import numpy as np
 import pytest
-from torch_magnus import odeint
+from torch_linode import odeint
 
 # Define the highly oscillatory system for testing
 w0, w1, w2 = 10.0, 5.0, 20.0
