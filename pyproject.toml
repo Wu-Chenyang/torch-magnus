@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "torch-linode"
 version = "0.1.0"
 authors = [
-  { name="Wu-Chenyang", email="wuchenyang@stu.pku.edu.cn" },
+  { name="Wu-Chenyang", email="wucy@lamda.nju.edu.cn" },
 ]
 description = "A PyTorch-based library for batch solving homogeneous linear matrix ODEs."
 readme = "README.md"
