@@ -7,6 +7,9 @@ import matplotlib.pyplot as plt
 import warnings
 import heapq
 
+from .butcher import GL2, GL4, GL6
+from .collocation import Collocation
+
 Tensor = torch.Tensor
 TimeSpan = Union[Tuple[float, float], List[float], torch.Tensor]
 
@@ -211,180 +214,7 @@ class Magnus6th(BaseStepper):
 # Gauss-Legendre Runge-Kutta (GLRK) Single-Step Integrators
 # -----------------------------------------------------------------------------
 
-class GLRK2nd(BaseStepper):
-    """Second-order implicit Gauss-Legendre Runge-Kutta integrator."""
-    order = 2
-    c = 0.5
-    a = 0.5
-    b = 1.0
 
-    def forward(self, A: Callable[..., Tensor], t0: Union[Sequence[float], torch.Tensor, float], h: Union[Sequence[float], torch.Tensor, float], y0: Tensor) -> Tuple[Tensor, Tuple[Tensor, ...]]:
-        t0 = torch.as_tensor(t0, device=y0.device, dtype=y0.dtype)
-        h_tensor = torch.as_tensor(h, device=y0.device, dtype=y0.dtype)
-        
-        t1 = t0 + self.c * h_tensor
-        A1_out = A(t1)
-        if isinstance(A1_out, tuple) and len(A1_out) == 2:
-            A1, g1 = A1_out
-            is_nonhomogeneous_glrk = True
-        else:
-            A1 = A1_out
-            g1 = None
-            is_nonhomogeneous_glrk = False
-
-        *batch_shape, d = y0.shape
-        I_d = torch.eye(d, device=y0.device, dtype=y0.dtype)
-
-        h_exp = h_tensor
-        while h_exp.ndim < A1.ndim:
-            h_exp = h_exp.unsqueeze(-1)
-
-        L = I_d - h_exp * self.a * A1
-        R = _apply_matrix(A1, y0)
-        if is_nonhomogeneous_glrk:
-            R = R + g1
-        
-        k1 = torch.linalg.solve(L, R.unsqueeze(-1)).squeeze(-1)
-
-        y_next = y0 + h_tensor.unsqueeze(-1) * self.b * k1
-        
-        return y_next, A1.unsqueeze(0)
-
-
-class GLRK4th(BaseStepper):
-    """Fourth-order implicit Gauss-Legendre Runge-Kutta integrator."""
-    order = 4
-    _sqrt3 = math.sqrt(3.0)
-    c1, c2 = 0.5 - _sqrt3 / 6, 0.5 + _sqrt3 / 6
-    a11, a12 = 1.0/4.0, 1.0/4.0 - _sqrt3 / 6.0
-    a21, a22 = 1.0/4.0 + _sqrt3 / 6.0, 1.0/4.0
-    b1, b2 = 0.5, 0.5
-
-    def forward(self, A: Callable[..., Tensor], t0: Union[Sequence[float], torch.Tensor, float], h: Union[Sequence[float], torch.Tensor, float], y0: Tensor) -> Tuple[Tensor, Tuple[Tensor, ...]]:
-        t0 = torch.as_tensor(t0, device=y0.device, dtype=y0.dtype)
-        h_tensor = torch.as_tensor(h, device=y0.device, dtype=y0.dtype)
-        
-        t1, t2 = t0 + self.c1 * h_tensor, t0 + self.c2 * h_tensor
-        
-        A12_out = A(torch.cat([t1.view(-1), t2.view(-1)]))
-        if isinstance(A12_out, tuple) and len(A12_out) == 2:
-            A12, g12 = A12_out
-            A1, A2 = A12.split(t1.numel(), dim=-3)
-            g1, g2 = g12.split(t1.numel(), dim=-2)
-            is_nonhomogeneous_glrk = True
-        else:
-            A12 = A12_out
-            A1, A2 = A12.split(t1.numel(), dim=-3)
-            g1, g2 = None, None
-            is_nonhomogeneous_glrk = False
-        
-        if t1.ndim == 0:
-            A1, A2 = A1.squeeze(-3), A2.squeeze(-3)
-            if is_nonhomogeneous_glrk:
-                g1, g2 = g1.squeeze(-2), g2.squeeze(-2)
-
-        *batch_shape, d = y0.shape
-        I_d = torch.eye(d, device=y0.device, dtype=y0.dtype)
-        
-        h_exp = h_tensor
-        while h_exp.ndim < A1.ndim:
-            h_exp = h_exp.unsqueeze(-1)
-
-        L = torch.zeros(*A1.shape[:-2], 2 * d, 2 * d, device=y0.device, dtype=y0.dtype)
-        L[..., :d, :d] = I_d - h_exp * self.a11 * A1
-        L[..., :d, d:] = -h_exp * self.a12 * A1
-        L[..., d:, :d] = -h_exp * self.a21 * A2
-        L[..., d:, d:] = I_d - h_exp * self.a22 * A2
-
-        R1 = _apply_matrix(A1, y0)
-        if is_nonhomogeneous_glrk:
-            R1 = R1 + g1
-        R2 = _apply_matrix(A2, y0)
-        if is_nonhomogeneous_glrk:
-            R2 = R2 + g2
-        R = torch.cat([R1, R2], dim=-1)
-
-        K_flat = torch.linalg.solve(L, R)
-        k1, k2 = K_flat[..., :d], K_flat[..., d:]
-
-        y_next = y0 + h_tensor.unsqueeze(-1) * (self.b1 * k1 + self.b2 * k2)
-        
-        return y_next, torch.stack((A1, A2), dim=0)
-
-
-class GLRK6th(BaseStepper):
-    """Sixth-order implicit Gauss-Legendre Runge-Kutta integrator."""
-    order = 6
-    _sqrt15 = math.sqrt(15.0)
-    c1, c2, c3 = 0.5 - _sqrt15 / 10, 0.5, 0.5 + _sqrt15 / 10
-    
-    a11, a12, a13 = 5.0/36.0, 2.0/9.0 - _sqrt15/15.0, 5.0/36.0 - _sqrt15/30.0
-    a21, a22, a23 = 5.0/36.0 + _sqrt15/24.0, 2.0/9.0, 5.0/36.0 - _sqrt15/24.0
-    a31, a32, a33 = 5.0/36.0 + _sqrt15/30.0, 2.0/9.0 + _sqrt15/15.0, 5.0/36.0
-    
-    b1, b2, b3 = 5.0/18.0, 4.0/9.0, 5.0/18.0
-
-    def forward(self, A: Callable[..., Tensor], t0: Union[Sequence[float], torch.Tensor, float], h: Union[Sequence[float], torch.Tensor, float], y0: Tensor) -> Tuple[Tensor, Tuple[Tensor, ...]]:
-        t0 = torch.as_tensor(t0, device=y0.device, dtype=y0.dtype)
-        h_tensor = torch.as_tensor(h, device=y0.device, dtype=y0.dtype)
-        
-        t1, t2, t3 = t0 + self.c1 * h_tensor, t0 + self.c2 * h_tensor, t0 + self.c3 * h_tensor
-        
-        A123_out = A(torch.cat([t1.view(-1), t2.view(-1), t3.view(-1)]))
-        if isinstance(A123_out, tuple) and len(A123_out) == 2:
-            A123, g123 = A123_out
-            A1, A2, A3 = A123.split(t1.numel(), dim=-3)
-            g1, g2, g3 = g123.split(t1.numel(), dim=-2)
-            is_nonhomogeneous_glrk = True
-        else:
-            A123 = A123_out
-            A1, A2, A3 = A123.split(t1.numel(), dim=-3)
-            g1, g2, g3 = None, None, None
-            is_nonhomogeneous_glrk = False
-
-        if t1.ndim == 0:
-            A1, A2, A3 = A1.squeeze(-3), A2.squeeze(-3), A3.squeeze(-3)
-            if is_nonhomogeneous_glrk:
-                g1, g2, g3 = g1.squeeze(-2), g2.squeeze(-2), g3.squeeze(-2)
-
-        *batch_shape, d = y0.shape
-        I_d = torch.eye(d, device=y0.device, dtype=y0.dtype)
-        
-        h_exp = h_tensor
-        while h_exp.ndim < A1.ndim:
-            h_exp = h_exp.unsqueeze(-1)
-
-        L = torch.zeros(*A1.shape[:-2], 3 * d, 3 * d, device=y0.device, dtype=y0.dtype)
-        # Row 1
-        L[..., :d, :d] = I_d - h_exp * self.a11 * A1
-        L[..., :d, d:2*d] = -h_exp * self.a12 * A1
-        L[..., :d, 2*d:] = -h_exp * self.a13 * A1
-        # Row 2
-        L[..., d:2*d, :d] = -h_exp * self.a21 * A2
-        L[..., d:2*d, d:2*d] = I_d - h_exp * self.a22 * A2
-        L[..., d:2*d, 2*d:] = -h_exp * self.a23 * A2
-        # Row 3
-        L[..., 2*d:, :d] = -h_exp * self.a31 * A3
-        L[..., 2*d:, d:2*d] = -h_exp * self.a32 * A3
-        L[..., 2*d:, 2*d:] = I_d - h_exp * self.a33 * A3
-
-        R1 = _apply_matrix(A1, y0)
-        if is_nonhomogeneous_glrk:
-            R1 = R1 + g1
-        R2 = _apply_matrix(A2, y0)
-        if is_nonhomogeneous_glrk:
-            R2 = R2 + g2
-        R3 = _apply_matrix(A3, y0)
-        if is_nonhomogeneous_glrk:
-            R3 = R3 + g3
-        R = torch.cat([R1, R2, R3], dim=-1)
-
-        K_flat = torch.linalg.solve(L, R)
-        k1, k2, k3 = K_flat[..., :d], K_flat[..., d:2*d], K_flat[..., 2*d:]
-
-        y_next = y0 + h_tensor.unsqueeze(-1) * (self.b1 * k1 + self.b2 * k2 + self.b3 * k3)
-        
-        return y_next, torch.stack((A1, A2, A3), dim=0)
 
 # -----------------------------------------------------------------------------
 # Adaptive Stepping
@@ -457,9 +287,9 @@ class DenseOutputNaive:
             elif self.order == 6: self.integrator = Magnus6th()
             else: raise ValueError(f"Invalid order: {order} for Magnus")
         elif method == 'glrk':
-            if self.order == 2: self.integrator = GLRK2nd()
-            elif self.order == 4: self.integrator = GLRK4th()
-            elif self.order == 6: self.integrator = GLRK6th()
+            if self.order == 2: self.integrator = Collocation(GL2)
+            elif self.order == 4: self.integrator = Collocation(GL4)
+            elif self.order == 6: self.integrator = Collocation(GL6)
             else: raise ValueError(f"Invalid order: {order} for GLRK")
         else: raise ValueError(f"Invalid method: {method}")
 
@@ -643,9 +473,9 @@ def adaptive_ode_solve(
         elif order == 6: integrator = Magnus6th()
         else: raise ValueError(f"Invalid order {order} for Magnus method")
     elif method == 'glrk':
-        if order == 2: integrator = GLRK2nd()
-        elif order == 4: integrator = GLRK4th()
-        elif order == 6: integrator = GLRK6th()
+        if order == 2: integrator = Collocation(GL2)
+        elif order == 4: integrator = Collocation(GL4)
+        elif order == 6: integrator = Collocation(GL6)
         else: raise ValueError(f"Invalid order {order} for GLRK method")
     else:
         raise ValueError(f"Unknown integration method: {method}")

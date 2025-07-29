@@ -14,7 +14,7 @@ It leverages Magnus-type integrators to provide high-precision, differentiable, 
 
 - **Solves Homogeneous & Non-homogeneous Systems**: Unified API for both types of linear ODEs.
 - **Batch Processing**: Natively handles batches of initial conditions and parameters for massive parallelization.
-- **High-Order Integrators**: Includes 2nd, 4th, and 6th-order Magnus and Gauss-Legendre Runge-Kutta (GLRK) integrators.
+- **High-Order Integrators**: Includes 2nd, 4th, and 6th-order Magnus integrators, and a generic `Collocation` solver supporting various Butcher tableaus (e.g., Gauss-Legendre, Radau IIA).
 - **Adaptive Stepping**: Automatically adjusts step size to meet specified error tolerances (`rtol`, `atol`).
 - **Differentiable**: Gradients can be backpropagated through the solvers using a memory-efficient adjoint method.
 - **Dense Output**: Provides continuous solutions for evaluation at any time point.
@@ -56,6 +56,24 @@ odeint(
 - `y0`: A tensor of initial conditions with shape `(*batch_shape, dim)`.
 - `t`: A 1D tensor or sequence of time points at which to evaluate the solution.
 - `params`: Optional tensor of parameters to be passed to the system function.
+- `method`: Integration method. Currently supports `'magnus'` (for Magnus integrators) and `'glrk'` (for Gauss-Legendre Runge-Kutta methods, which now use the generic `Collocation` solver).
+- `order`: Integrator order. For Magnus, supports 2, 4, or 6. For `glrk` method, this implicitly selects the corresponding Butcher tableau (e.g., `order=4` for `glrk` uses `GL4`).
+- `rtol`: Relative tolerance for adaptive stepping.
+- `atol`: Absolute tolerance for adaptive stepping.
+- `dense_output`: If `True`, returns a `DenseOutput` object for continuous interpolation.
+- `dense_output_method`: Method for dense output (`'naive'` or `'collocation'`).
+
+### Available Butcher Tableaus (for `method='glrk'`)
+
+The `glrk` method now leverages a generic `Collocation` solver and can be configured with various Butcher tableaus. The `order` parameter implicitly selects the tableau:
+- `order=2`: Uses `GL2` (2-stage Gauss-Legendre, order 4)
+- `order=4`: Uses `GL4` (2-stage Gauss-Legendre, order 4)
+- `order=6`: Uses `GL6` (3-stage Gauss-Legendre, order 6)
+
+Additionally, the following Radau IIA tableaus are available internally and can be used by directly instantiating `Collocation` with the desired tableau:
+- `RADAU2` (1-stage Radau IIA, order 1)
+- `RADAU4` (2-stage Radau IIA, order 3)
+- `RADAU6` (3-stage Radau IIA, order 5)
 
 ### Returns
 
@@ -93,7 +111,9 @@ t_span = torch.linspace(0, 2 * np.pi, 30, dtype=torch.float64)
 solution = odeint(
     system_func_or_module=system_func,
     y0=y0,
-    t=t_span
+    t=t_span,
+    method='glrk', # Specify the method
+    order=4 # Specify the order for GLRK (uses GL4 tableau)
 )
 
 # 4. The exact solution is y(t) = [cos(t) + t*sin(t), -sin(t) + t*cos(t)]
