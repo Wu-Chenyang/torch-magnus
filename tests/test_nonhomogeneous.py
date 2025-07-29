@@ -9,7 +9,7 @@ ATOL = 1e-7
 def test_odeint_nonhomogeneous_correctness():
     """
     Tests the forward pass correctness of odeint for a non-homogeneous ODE
-    with a known analytical solution.
+    with a known analytical solution using Magnus method.
     """
     # 1. Define the problem: dy/dt = A(t)y(t) + g(t)
     # Let A(t) = [[0, 1], [-1, 0]] (constant rotation)
@@ -54,6 +54,139 @@ def test_odeint_nonhomogeneous_correctness():
     y_exact = exact_solution(t_span)
     
     # Assert that the solution is close to the exact one
+    assert torch.allclose(solution_trajectory, y_exact, rtol=RTOL, atol=ATOL), \
+        f"Max error: {torch.max(torch.norm(solution_trajectory - y_exact, dim=-1)).item()}"
+
+def test_odeint_nonhomogeneous_glrk_correctness():
+    """
+    Tests the forward pass correctness of odeint for a non-homogeneous ODE
+    with a known analytical solution using GLRK method.
+    """
+    # Define a simple non-homogeneous system: dy/dt = A*y + g
+    # A(t) = [[0, 0], [0, 0]]
+    # g(t) = [1, 1]
+    dim = 2
+    A = torch.zeros(dim, dim, dtype=torch.float64)
+
+    def system_func(t, params):
+        t_tensor = torch.as_tensor(t, dtype=torch.float64)
+        if t_tensor.ndim == 0:
+            A_t = A.unsqueeze(0)
+            g_t = torch.ones(dim, dtype=torch.float64).unsqueeze(0)
+        else:
+            A_t = A.expand(t_tensor.shape[0], dim, dim)
+            g_t = torch.ones(t_tensor.shape[0], dim, dtype=torch.float64)
+        return A_t, g_t
+
+    y0 = torch.zeros(dim, dtype=torch.float64)
+    t_span = torch.linspace(0, 1.0, 10, dtype=torch.float64)
+
+    solution_trajectory = odeint(
+        system_func_or_module=system_func,
+        y0=y0,
+        t=t_span,
+        params=None,
+        method='glrk',
+        order=6
+    )
+
+    def exact_solution(t):
+        return torch.stack([t, t], dim=-1)
+
+    y_exact = exact_solution(t_span)
+    
+    assert torch.allclose(solution_trajectory, y_exact, rtol=RTOL, atol=ATOL), \
+        f"Max error: {torch.max(torch.norm(solution_trajectory - y_exact, dim=-1)).item()}"
+
+def test_odeint_homogeneous_magnus_correctness():
+    """
+    Tests the forward pass correctness of odeint for a homogeneous ODE
+    with a known analytical solution using Magnus method.
+    """
+    # 1. Define the problem: dy/dt = A(t)y(t)
+    # Let A(t) = [[0, 1], [-1, 0]] (constant rotation)
+    dim = 2
+    A = torch.tensor([[0., 1.], [-1., 0.]], dtype=torch.float64)
+
+    def system_func(t, params):
+        t_tensor = torch.as_tensor(t, dtype=torch.float64)
+        if t_tensor.ndim == 0:
+            A_t = A.unsqueeze(0)
+        else:
+            A_t = A.expand(t_tensor.shape[0], dim, dim)
+        return A_t
+
+    # 2. Set initial conditions and time points
+    y0 = torch.tensor([1.0, 0.0], dtype=torch.float64)
+    t_span = torch.linspace(0, 2 * np.pi, 30, dtype=torch.float64)
+
+    # 3. Call the solver
+    solution_trajectory = odeint(
+        system_func_or_module=system_func,
+        y0=y0,
+        t=t_span,
+        params=None,
+        method='magnus',
+        order=6
+    )
+
+    # 4. Verification
+    # The exact solution is y(t) = [cos(t), -sin(t)]
+    def exact_solution(t):
+        cos_t = torch.cos(t)
+        sin_t = torch.sin(t)
+        y1 = cos_t
+        y2 = -sin_t
+        return torch.stack([y1, y2], dim=-1)
+
+    y_exact = exact_solution(t_span)
+    
+    assert torch.allclose(solution_trajectory, y_exact, rtol=RTOL, atol=ATOL), \
+        f"Max error: {torch.max(torch.norm(solution_trajectory - y_exact, dim=-1)).item()}"
+
+def test_odeint_homogeneous_glrk_correctness():
+    """
+    Tests the forward pass correctness of odeint for a homogeneous ODE
+    with a known analytical solution using GLRK method.
+    """
+    # 1. Define the problem: dy/dt = A(t)y(t)
+    # Let A(t) = [[0, 1], [-1, 0]] (constant rotation)
+    dim = 2
+    A = torch.tensor([[0., 1.], [-1., 0.]], dtype=torch.float64)
+
+    def system_func(t, params):
+        t_tensor = torch.as_tensor(t, dtype=torch.float64)
+        if t_tensor.ndim == 0:
+            A_t = A.unsqueeze(0)
+        else:
+            A_t = A.expand(t_tensor.shape[0], dim, dim)
+        return A_t
+
+    # 2. Set initial conditions and time points
+    y0 = torch.tensor([1.0, 0.0], dtype=torch.float64)
+    t_span = torch.linspace(0, 2 * np.pi, 30, dtype=torch.float64)
+
+    # 3. Call the solver
+    solution_trajectory = odeint(
+        system_func_or_module=system_func,
+        y0=y0,
+        t=t_span,
+        params=None,
+        method='glrk',
+        order=6
+    )
+
+    # 4. Verification
+    # The exact solution is y(t) = [cos(t), -sin(t)]
+    def exact_solution(t):
+        cos_t = torch.cos(t)
+        sin_t = torch.sin(t)
+        y1 = cos_t
+        y2 = -sin_t
+        return torch.stack([y1, y2], dim=-1)
+
+    y_exact = exact_solution(t_span)
+    
     assert torch.allclose(solution_trajectory, y_exact, rtol=RTOL, atol=ATOL), \
         f"Max error: {torch.max(torch.norm(solution_trajectory - y_exact, dim=-1)).item()}"
 
@@ -151,7 +284,7 @@ def test_odeint_adjoint_batching_gradient():
     batch_size = 3
     dim = 2
     # Each item in the batch has its own parameter
-    p_vals = torch.tensor([0.5, 1.0, 1.5], dtype=torch.float64).view(batch_size, 1)
+    p_vals = torch.as_tensor([0.5, 1.0, 1.5], dtype=torch.float64).view(batch_size, 1)
     p = p_vals.clone().requires_grad_(True)
 
     def system_func(t, params):
@@ -202,4 +335,3 @@ def test_odeint_adjoint_batching_gradient():
         f"Shape mismatch: {grad_batch.shape} vs {grad_manual_batch.shape}"
     assert torch.allclose(grad_batch, grad_manual_batch, rtol=RTOL, atol=ATOL), \
         "Batched gradients do not match individually computed gradients."
-

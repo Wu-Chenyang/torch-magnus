@@ -223,7 +223,14 @@ class GLRK2nd(BaseStepper):
         h_tensor = torch.as_tensor(h, device=y0.device, dtype=y0.dtype)
         
         t1 = t0 + self.c * h_tensor
-        A1 = A(t1)
+        A1_out = A(t1)
+        if isinstance(A1_out, tuple) and len(A1_out) == 2:
+            A1, g1 = A1_out
+            is_nonhomogeneous_glrk = True
+        else:
+            A1 = A1_out
+            g1 = None
+            is_nonhomogeneous_glrk = False
 
         *batch_shape, d = y0.shape
         I_d = torch.eye(d, device=y0.device, dtype=y0.dtype)
@@ -234,6 +241,8 @@ class GLRK2nd(BaseStepper):
 
         L = I_d - h_exp * self.a * A1
         R = _apply_matrix(A1, y0)
+        if is_nonhomogeneous_glrk:
+            R = R + g1
         
         k1 = torch.linalg.solve(L, R.unsqueeze(-1)).squeeze(-1)
 
@@ -257,10 +266,22 @@ class GLRK4th(BaseStepper):
         
         t1, t2 = t0 + self.c1 * h_tensor, t0 + self.c2 * h_tensor
         
-        A12 = A(torch.cat([t1.view(-1), t2.view(-1)]))
-        A1, A2 = A12.split(t1.numel(), dim=-3)
+        A12_out = A(torch.cat([t1.view(-1), t2.view(-1)]))
+        if isinstance(A12_out, tuple) and len(A12_out) == 2:
+            A12, g12 = A12_out
+            A1, A2 = A12.split(t1.numel(), dim=-3)
+            g1, g2 = g12.split(t1.numel(), dim=-2)
+            is_nonhomogeneous_glrk = True
+        else:
+            A12 = A12_out
+            A1, A2 = A12.split(t1.numel(), dim=-3)
+            g1, g2 = None, None
+            is_nonhomogeneous_glrk = False
+        
         if t1.ndim == 0:
             A1, A2 = A1.squeeze(-3), A2.squeeze(-3)
+            if is_nonhomogeneous_glrk:
+                g1, g2 = g1.squeeze(-2), g2.squeeze(-2)
 
         *batch_shape, d = y0.shape
         I_d = torch.eye(d, device=y0.device, dtype=y0.dtype)
@@ -276,7 +297,11 @@ class GLRK4th(BaseStepper):
         L[..., d:, d:] = I_d - h_exp * self.a22 * A2
 
         R1 = _apply_matrix(A1, y0)
+        if is_nonhomogeneous_glrk:
+            R1 = R1 + g1
         R2 = _apply_matrix(A2, y0)
+        if is_nonhomogeneous_glrk:
+            R2 = R2 + g2
         R = torch.cat([R1, R2], dim=-1)
 
         K_flat = torch.linalg.solve(L, R)
@@ -305,10 +330,22 @@ class GLRK6th(BaseStepper):
         
         t1, t2, t3 = t0 + self.c1 * h_tensor, t0 + self.c2 * h_tensor, t0 + self.c3 * h_tensor
         
-        A123 = A(torch.cat([t1.view(-1), t2.view(-1), t3.view(-1)]))
-        A1, A2, A3 = A123.split(t1.numel(), dim=-3)
+        A123_out = A(torch.cat([t1.view(-1), t2.view(-1), t3.view(-1)]))
+        if isinstance(A123_out, tuple) and len(A123_out) == 2:
+            A123, g123 = A123_out
+            A1, A2, A3 = A123.split(t1.numel(), dim=-3)
+            g1, g2, g3 = g123.split(t1.numel(), dim=-2)
+            is_nonhomogeneous_glrk = True
+        else:
+            A123 = A123_out
+            A1, A2, A3 = A123.split(t1.numel(), dim=-3)
+            g1, g2, g3 = None, None, None
+            is_nonhomogeneous_glrk = False
+
         if t1.ndim == 0:
             A1, A2, A3 = A1.squeeze(-3), A2.squeeze(-3), A3.squeeze(-3)
+            if is_nonhomogeneous_glrk:
+                g1, g2, g3 = g1.squeeze(-2), g2.squeeze(-2), g3.squeeze(-2)
 
         *batch_shape, d = y0.shape
         I_d = torch.eye(d, device=y0.device, dtype=y0.dtype)
@@ -332,8 +369,14 @@ class GLRK6th(BaseStepper):
         L[..., 2*d:, 2*d:] = I_d - h_exp * self.a33 * A3
 
         R1 = _apply_matrix(A1, y0)
+        if is_nonhomogeneous_glrk:
+            R1 = R1 + g1
         R2 = _apply_matrix(A2, y0)
+        if is_nonhomogeneous_glrk:
+            R2 = R2 + g2
         R3 = _apply_matrix(A3, y0)
+        if is_nonhomogeneous_glrk:
+            R3 = R3 + g3
         R = torch.cat([R1, R2, R3], dim=-1)
 
         K_flat = torch.linalg.solve(L, R)
@@ -390,7 +433,7 @@ class DenseOutputNaive:
     evaluations for each interpolation but maintains the 2s order accuracy of the solver.
     """
     
-    def __init__(self, ys: Tensor, ts: Tensor, order: int, A_func: Callable):
+    def __init__(self, ys: Tensor, ts: Tensor, order: int, A_func: Callable, method: str):
         """
         Initialize dense output interpolator.
         
@@ -408,10 +451,17 @@ class DenseOutputNaive:
              self.t_grid = torch.flip(self.t_grid, dims=[0])
              self.ys = torch.flip(self.ys, dims=[-2])
 
-        if self.order == 2: self.integrator = Magnus2nd()
-        elif self.order == 4: self.integrator = Magnus4th()
-        elif self.order == 6: self.integrator = Magnus6th()
-        else: raise ValueError(f"Invalid order: {order}")
+        if method == 'magnus':
+            if self.order == 2: self.integrator = Magnus2nd()
+            elif self.order == 4: self.integrator = Magnus4th()
+            elif self.order == 6: self.integrator = Magnus6th()
+            else: raise ValueError(f"Invalid order: {order} for Magnus")
+        elif method == 'glrk':
+            if self.order == 2: self.integrator = GLRK2nd()
+            elif self.order == 4: self.integrator = GLRK4th()
+            elif self.order == 6: self.integrator = GLRK6th()
+            else: raise ValueError(f"Invalid order: {order} for GLRK")
+        else: raise ValueError(f"Invalid method: {method}")
 
     def __call__(self, t_batch: Tensor) -> Tensor:
         """
@@ -662,7 +712,7 @@ def adaptive_ode_solve(
                 A_nodes_out = torch.stack(A_nodes_traj, dim=-3)
                 return CollocationDenseOutput(ys_out, ts_out, A_nodes_out, order)
             else:
-                return DenseOutputNaive(ys_out, ts_out, order, A_func_bound)
+                return DenseOutputNaive(ys_out, ts_out, order, A_func_bound, method)
     return y
 
 def odeint(
@@ -717,6 +767,7 @@ def odeint(
         is_nonhomogeneous = False
         solver_func = functional_system_func
         y_in = y0
+        output_slicer = lambda sol: sol # Default no slicing
     elif isinstance(probe_result, tuple) and len(probe_result) == 2:
         is_nonhomogeneous = True
         A_probe, g_probe = probe_result
@@ -728,18 +779,29 @@ def odeint(
         if not (g_probe.ndim >= 1 and g_probe.shape[-1] == dim):
             raise ValueError(f"Expected g(t) to have shape (..., {dim}), but got {g_probe.shape}")
 
-        def augmented_B_func(t_val, p_dict_combined):
-            A_t, g_t = functional_system_func(t_val, p_dict_combined)
-            g_t = g_t.unsqueeze(-1)
-            *batch_dims, _, _ = A_t.shape
-            B_t = torch.zeros(*batch_dims, dim + 1, dim + 1, dtype=A_t.dtype, device=A_t.device)
-            B_t[..., :dim, :dim] = A_t
-            B_t[..., :dim, dim] = g_t.squeeze(-1)
-            return B_t
-        
-        solver_func = augmented_B_func
-        ones = torch.ones_like(y0[..., :1])
-        y_in = torch.cat([y0, ones], dim=-1)
+        if method == 'glrk':
+            # For GLRK, pass the original functional_system_func (which returns (A, g))
+            solver_func = functional_system_func
+            y_in = y0 # y_in remains original y0
+            output_slicer = lambda sol: sol # No slicing needed for GLRK non-homogeneous
+            
+        elif method == 'magnus':
+            # For Magnus, use the augmented system
+            def augmented_B_func(t_val, p_dict_combined):
+                A_t, g_t = functional_system_func(t_val, p_dict_combined)
+                g_t = g_t.unsqueeze(-1)
+                *batch_dims, _, _ = A_t.shape
+                B_t = torch.zeros(*batch_dims, dim + 1, dim + 1, dtype=A_t.dtype, device=A_t.device)
+                B_t[..., :dim, :dim] = A_t
+                B_t[..., :dim, dim] = g_t.squeeze(-1)
+                return B_t
+            
+            solver_func = augmented_B_func
+            ones = torch.ones_like(y0[..., :1])
+            y_in = torch.cat([y0, ones], dim=-1) # y_in becomes augmented
+            output_slicer = lambda sol: sol[..., :-1] # Slicing needed for Magnus augmented
+        else:
+            raise ValueError(f"Unknown integration method: {method}")
     else:
         raise TypeError(
             "system_func_or_module must return a Tensor (for homogeneous systems) "
@@ -763,18 +825,19 @@ def odeint(
         solution = torch.stack(ys_out, dim=-2)
 
     # --- Handle output slicing for non-homogeneous case ---
-    if is_nonhomogeneous:
+    if is_nonhomogeneous and method == 'magnus':
         if dense_output:
             # Wrap the dense output object to slice the result on-the-fly
             class _SlicedDenseOutput:
-                def __init__(self, dense_output_obj):
+                def __init__(self, dense_output_obj, slicer_func):
                     self.dense_output_obj = dense_output_obj
+                    self.slicer_func = slicer_func
                 def __call__(self, t_batch: Tensor) -> Tensor:
                     Y_interp = self.dense_output_obj(t_batch)
-                    return Y_interp[..., :-1]
-            return _SlicedDenseOutput(solution)
+                    return self.slicer_func(Y_interp)
+            return _SlicedDenseOutput(solution, output_slicer)
         else:
-            return solution[..., :-1]
+            return output_slicer(solution)
     else:
         return solution
 
@@ -846,12 +909,8 @@ class AdaptiveGaussKronrod(BaseQuadrature):
             _, vjp_fn = torch.func.vjp(lambda p: f_for_vjp(segment_nodes, p), params_req)
 
         # Prepare cotangents for VJP
-        if is_nonhomogeneous:
-            cotangent_K = (h * weights_k * a_eval, h * weights_k * a_eval)
-            cotangent_G = (h * weights_g * a_eval, h * weights_g * a_eval)
-        else:
-            cotangent_K = h * weights_k * a_eval
-            cotangent_G = h * weights_g * a_eval
+        cotangent_K = h * weights_k * a_eval
+        cotangent_G = h * weights_g * a_eval
 
         I_K = vjp_fn(cotangent_K)[0]
         I_G = vjp_fn(cotangent_G)[0]
@@ -951,20 +1010,17 @@ class FixedSimpson(BaseQuadrature):
             weights[2:-1:2] = 2.0
             weights *= (h / 3.0)
             
-            if is_nonhomogeneous:
-                cotangent = (weights.unsqueeze(1) * a_eval, weights.unsqueeze(1) * a_eval)
-            else:
-                cotangent = weights.unsqueeze(1) * a_eval
+            cotangent = weights.unsqueeze(1) * a_eval
 
             integral_dict = vjp_fn(cotangent)[0]
 
         return integral_dict
 
 # -----------------------------------------------------------------------------
-# Decoupled Adjoint Method with Continuous Magnus Extension
+# Decoupled Adjoint Method
 # -----------------------------------------------------------------------------
 
-class _MagnusAdjoint(torch.autograd.Function):
+class _Adjoint(torch.autograd.Function):
     """Magnus integrator with memory-efficient adjoint gradient computation."""
     
     @staticmethod
@@ -986,18 +1042,26 @@ class _MagnusAdjoint(torch.autograd.Function):
             is_nonhomogeneous = True
             dim = y0.shape[-1]
             
-            def augmented_B_func(t_val, p_dict_combined):
-                A_t, g_t = functional_system_func(t_val, p_dict_combined)
-                g_t = g_t.unsqueeze(-1)
-                *batch_dims, _, _ = A_t.shape
-                B_t = torch.zeros(*batch_dims, dim + 1, dim + 1, dtype=A_t.dtype, device=A_t.device)
-                B_t[..., :dim, :dim] = A_t
-                B_t[..., :dim, dim] = g_t.squeeze(-1)
-                return B_t
-            
-            solver_func = augmented_B_func
-            ones = torch.ones_like(y0[..., :1])
-            y_in = torch.cat([y0, ones], dim=-1)
+            if method == 'glrk':
+                # For GLRK, pass the original functional_system_func (which returns (A, g))
+                solver_func = functional_system_func
+                y_in = y0 # y_in remains original y0
+                
+            elif method == 'magnus':
+                def augmented_B_func(t_val, p_dict_combined):
+                    A_t, g_t = functional_system_func(t_val, p_dict_combined)
+                    g_t = g_t.unsqueeze(-1)
+                    *batch_dims, _, _ = A_t.shape
+                    B_t = torch.zeros(*batch_dims, dim + 1, dim + 1, dtype=A_t.dtype, device=A_t.device)
+                    B_t[..., :dim, :dim] = A_t
+                    B_t[..., :dim, dim] = g_t.squeeze(-1)
+                    return B_t
+                
+                solver_func = augmented_B_func
+                ones = torch.ones_like(y0[..., :1])
+                y_in = torch.cat([y0, ones], dim=-1)
+            else:
+                raise ValueError(f"Unknown integration method: {method}")
         else:
             raise TypeError(f"System function must return a Tensor or a Tuple[Tensor, Tensor], but got {type(probe_result)}")
 
@@ -1022,7 +1086,7 @@ class _MagnusAdjoint(torch.autograd.Function):
         
         ctx.save_for_backward(t, *param_values)
         
-        return y_traj_maybe_aug[..., :-1] if is_nonhomogeneous else y_traj_maybe_aug
+        return y_traj_maybe_aug[..., :-1] if is_nonhomogeneous and method == 'magnus' else y_traj_maybe_aug
 
     @staticmethod
     def backward(ctx, grad_y_traj: Tensor):
@@ -1040,7 +1104,7 @@ class _MagnusAdjoint(torch.autograd.Function):
         params_req = {k: v for k, v in full_p_and_b_dict.items() if v.requires_grad}
         buffers_dict = {k: v for k, v in full_p_and_b_dict.items() if not v.requires_grad}
 
-        if not params_req:
+        if not params_req and not ctx.y0_requires_grad:
             num_params = len(param_values)
             return (None,) * (10 + num_params)
 
@@ -1078,12 +1142,15 @@ class _MagnusAdjoint(torch.autograd.Function):
             def f_for_vjp(t_nodes, p_dict_req):
                 full_dict = {**p_dict_req, **buffers_dict}
                 y_eval_aug = y_dense_traj_aug(t_nodes)
-                y_eval = y_eval_aug[..., :-1] if is_nonhomogeneous else y_eval_aug
+                if is_nonhomogeneous and method == 'magnus':
+                    y_eval = y_eval_aug[..., :-1]
+                else:
+                    y_eval = y_eval_aug
                 
                 sys_out = functional_system_func(t_nodes, full_dict)
                 if is_nonhomogeneous:
                     A, g = sys_out
-                    return _apply_matrix(A, y_eval), g
+                    return _apply_matrix(A, y_eval) + g
                 else:
                     return _apply_matrix(sys_out, y_eval)
 
@@ -1155,7 +1222,7 @@ def odeint_adjoint(
     param_values = list(p_and_b_dict.values())
         
     # Pass all tensors and options as a flat list of arguments
-    return _MagnusAdjoint.apply(
+    return _Adjoint.apply(
         y0, t_vec, 
         functional_system_func, 
         param_keys, method, order, rtol, atol, 
