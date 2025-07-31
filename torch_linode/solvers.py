@@ -291,9 +291,9 @@ class DenseOutputNaive:
         self.order = order
         self.A_func = A_func
         self.ys = ys
-        self.t_grid = ts
-        if self.t_grid[0] > self.t_grid[-1]:
-             self.t_grid = torch.flip(self.t_grid, dims=[0])
+        self.ts = ts
+        if self.ts[0] > self.ts[-1]:
+             self.ts = torch.flip(self.ts, dims=[0])
              self.ys = torch.flip(self.ys, dims=[-2])
 
         if method == 'magnus':
@@ -320,10 +320,10 @@ class DenseOutputNaive:
             Solution tensor of shape (*batch_shape, *time_shape, dim)
         """
         # Find the interval each t_batch point falls into
-        indices = torch.searchsorted(self.t_grid, t_batch, right=True) - 1
+        indices = torch.searchsorted(self.ts, t_batch, right=True) - 1
         
         # Get the starting points (t0, y0) for each interpolation
-        t0 = self.t_grid[indices]
+        t0 = self.ts[indices]
         if indices.ndim == 0:
             y0 = self.ys[..., indices, :]
         else:
@@ -445,6 +445,128 @@ class CollocationDenseOutput:
         Omega = alpha1 + alpha3/12 + (1/240)*_commutator(term_in_comm, term_with_comm)
         
         return Omega
+    
+def merge_dense_outputs(dense_outputs: List[Union['DenseOutputNaive', 'CollocationDenseOutput']]) -> Union['DenseOutputNaive', 'CollocationDenseOutput']:
+    """
+    Merge multiple dense output instances with connected time intervals.
+    
+    Args:
+        dense_outputs: List of dense output instances to merge
+        
+    Returns:
+        A new merged dense output instance
+        
+    Raises:
+        ValueError: If intervals are not properly connected or instances are incompatible
+    """
+    if not dense_outputs:
+        raise ValueError("Cannot merge empty list of dense outputs")
+    
+    if len(dense_outputs) == 1:
+        return dense_outputs[0]
+    
+    # Check that all instances are of the same type
+    output_type = type(dense_outputs[0])
+    if not all(isinstance(output, output_type) for output in dense_outputs):
+        raise ValueError("All dense outputs must be of the same type")
+    
+    # Verify intervals are connected
+    for i in range(len(dense_outputs) - 1):
+        current_end = dense_outputs[i].ts[-1]
+        next_start = dense_outputs[i + 1].ts[0]
+        if not torch.allclose(current_end, next_start, atol=1e-10):
+            raise ValueError(f"Intervals are not connected: gap between {current_end} and {next_start}")
+    
+    # Merge based on the type
+    if output_type == DenseOutputNaive:
+        return _merge_naive_dense_outputs(dense_outputs)
+    elif output_type == CollocationDenseOutput:
+        return _merge_collocation_dense_outputs(dense_outputs)
+    else:
+        raise ValueError(f"Unknown dense output type: {output_type}")
+
+def _merge_naive_dense_outputs(dense_outputs: List['DenseOutputNaive']) -> 'DenseOutputNaive':
+    """Merge DenseOutputNaive instances."""
+    first_output = dense_outputs[0]
+    
+    # Collect time grids and states, removing duplicate boundary points
+    merged_ts = [dense_outputs[0].ts]
+    merged_ys = [dense_outputs[0].ys]
+    
+    for i in range(1, len(dense_outputs)):
+        # Skip the first time point of subsequent intervals (it's duplicate)
+        merged_ts.append(dense_outputs[i].ts[1:])
+        merged_ys.append(dense_outputs[i].ys[..., 1:, :])
+    
+    # Concatenate along time dimension
+    merged_t_grid = torch.cat(merged_ts, dim=0)
+    merged_y_states = torch.cat(merged_ys, dim=-2)
+    
+    # Create new merged instance
+    # We need to determine the method from the integrator type
+    if isinstance(first_output.integrator, Magnus2nd):
+        method = 'magnus'
+    elif isinstance(first_output.integrator, Magnus4th):
+        method = 'magnus'
+    elif isinstance(first_output.integrator, Magnus6th):
+        method = 'magnus'
+    elif isinstance(first_output.integrator, Collocation):
+        method = 'glrk'
+    else:
+        raise ValueError("Unknown integrator type")
+    
+    return DenseOutputNaive(
+        ys=merged_y_states,
+        ts=merged_t_grid,
+        order=first_output.order,
+        A_func=first_output.A_func,
+        method=method
+    )
+
+
+def _merge_collocation_dense_outputs(dense_outputs: List['CollocationDenseOutput']) -> 'CollocationDenseOutput':
+    """Merge CollocationDenseOutput instances."""
+    first_output = dense_outputs[0]
+    
+    # Collect time grids, states, and cached data
+    merged_ts = [dense_outputs[0].ts]
+    merged_ys = [dense_outputs[0].ys]
+    merged_A_nodes = [dense_outputs[0].A_nodes_traj]
+    
+    for i in range(1, len(dense_outputs)):
+        # Skip the first time point of subsequent intervals (it's duplicate)
+        merged_ts.append(dense_outputs[i].ts[1:])
+        merged_ys.append(dense_outputs[i].ys[..., 1:, :])
+        
+        # For A_nodes_traj, we skip the first interval since it corresponds to 
+        # the boundary point we're removing
+        if len(dense_outputs[i].A_nodes_traj.shape) > 3:
+            merged_A_nodes.append(dense_outputs[i].A_nodes_traj[..., :-1, :, :])
+        else:
+            merged_A_nodes.append(dense_outputs[i].A_nodes_traj[..., :-1, :, :])
+    
+    # Concatenate along appropriate dimensions
+    merged_t_grid = torch.cat(merged_ts, dim=0)
+    merged_y_states = torch.cat(merged_ys, dim=-2)
+    
+    # Handle A_nodes_traj concatenation - this is along the interval dimension
+    if isinstance(merged_A_nodes[0], torch.Tensor):
+        merged_A_nodes_traj = torch.cat(merged_A_nodes, dim=-3)
+    else:
+        # If it's a list of tuples, concatenate each component
+        num_components = len(merged_A_nodes[0])
+        concatenated_components = []
+        for comp_idx in range(num_components):
+            comp_data = [nodes[comp_idx] for nodes in merged_A_nodes]
+            concatenated_components.append(torch.cat(comp_data, dim=-3))
+        merged_A_nodes_traj = tuple(concatenated_components)
+    
+    return CollocationDenseOutput(
+        ys=merged_y_states,
+        ts=merged_t_grid,
+        A_nodes_traj=merged_A_nodes_traj,
+        order=first_output.order
+    )
 
 # -----------------------------------------------------------------------------
 # ODE Solver Interface
@@ -661,14 +783,27 @@ def odeint(
 
     # --- Solve the ODE ---
     if dense_output:
-        output = adaptive_ode_solve(
-            y_in, (t_vec[0], t_vec[-1]), solver_func, p_dict,
-            method, order, rtol, atol, dense_output=True, dense_output_method=dense_output_method, return_traj=return_traj
-        )
-        if return_traj:
-            solution, ys, ts = output[0], output[1], output[2]
-        else:
-            solution = output
+        sol_out = []
+        y_curr = y_in
+        ys_traj, ts_traj = [y_in.unsqueeze(-2)], [t_vec[0:1]]
+        for i in range(len(t_vec) - 1):
+            t0, t1 = float(t_vec[i]), float(t_vec[i + 1])
+            output = adaptive_ode_solve(
+                y_curr, (t0, t1), solver_func, p_dict,
+                method, order, rtol, atol, dense_output=True, dense_output_method=dense_output_method, return_traj=return_traj
+            )
+            if return_traj:
+                sol, ys, ts = output[0], output[1], output[2]
+                y_next = ys[..., -1, :]
+                ys_traj.append(ys[..., 1:, :])
+                ts_traj.append(ts[..., 1:])
+            else:
+                sol = output
+                y_next = sol(t1)
+            sol_out.append(sol)
+            y_curr = y_next
+
+        solution = merge_dense_outputs(sol_out)
     else:
         ys_out = [y_in]
         y_curr = y_in
@@ -686,9 +821,10 @@ def odeint(
             ys_out.append(y_next)
             y_curr = y_next
         solution = torch.stack(ys_out, dim=-2)
-        if return_traj:
-            ys_traj = torch.cat(ys_traj, dim=-2)
-            ts_traj = torch.cat(ts_traj, dim=-1)
+
+    if return_traj:
+        ys_traj = torch.cat(ys_traj, dim=-2)
+        ts_traj = torch.cat(ts_traj, dim=-1)
 
     # --- Handle output slicing for non-homogeneous case ---
     if is_nonhomogeneous and method == 'magnus':
