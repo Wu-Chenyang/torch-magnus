@@ -1,4 +1,52 @@
 import torch
+from typing import Union
+Tensor = torch.Tensor
+
+# -----------------------------------------------------------------------------
+# Basic Utilities
+# -----------------------------------------------------------------------------
+
+def _commutator(A: Tensor, B: Tensor) -> Tensor:
+    """
+    Compute the commutator [A, B] = AB - BA.
+    
+    Args:
+        A: Tensor of shape (..., dim, dim)
+        B: Tensor of shape (..., dim, dim)
+        
+    Returns:
+        Tensor of shape (..., dim, dim)
+    """
+    return A @ B - B @ A
+
+
+def _matrix_exp(A: Tensor) -> Tensor:
+    """
+    Compute matrix exponential for batched square matrices.
+    
+    Args:
+        A: Tensor of shape (..., dim, dim)
+        
+    Returns:
+        Tensor of shape (..., dim, dim)
+    """
+    if A.size(-1) != A.size(-2):
+        raise ValueError("matrix_exp only supports square matrices")
+    return torch.linalg.matrix_exp(A)
+
+
+def _apply_matrix(U: Tensor, y: Tensor) -> Tensor:
+    """
+    Apply matrix or batch of matrices to vector or batch of vectors.
+    
+    Args:
+        U: Tensor of shape (..., *batch_shape, dim, dim) or (dim, dim)
+        y: Tensor of shape (..., *batch_shape, dim)
+        
+    Returns:
+        Tensor of shape (..., *batch_shape, dim)
+    """
+    return (U @ y.unsqueeze(-1)).squeeze(-1)
 
 @torch.compile
 def arnoldi_iteration(
@@ -83,7 +131,7 @@ def arnoldi_iteration(
 def expm_multiply(
     A_dense: torch.Tensor,
     v_batch: torch.Tensor,
-    t_batch: torch.Tensor | float,
+    t_batch: Union[torch.Tensor, float],
     k: int = 30,
     tol: float = 1e-5,
 ):

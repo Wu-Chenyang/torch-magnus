@@ -56,6 +56,13 @@ class ButcherTableau:
             b_error=self.b_error.to(*args, **kwargs) if self.b_error is not None else None
         )
 
+    def get_t_nodes(self, t0:torch.Tensor, h:torch.Tensor):
+        self.c = self.c.to(device=t0.device, dtype=t0.dtype)
+        if t0.ndim == 0 and h.ndim == 0:
+            return t0 + self.c * h
+        else:
+            return (t0 + self.c.unsqueeze(-1) * h).reshape(-1)
+
 DOPRI5 = ButcherTableau(
     a=torch.tensor([
         [0, 0, 0, 0, 0, 0, 0],

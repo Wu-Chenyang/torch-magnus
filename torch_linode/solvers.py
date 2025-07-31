@@ -7,56 +7,10 @@ import torch.nn as nn
 from .butcher import GL2, GL4, GL6
 from .collocation import Collocation
 from .quadrature import AdaptiveGaussKronrod, FixedSimpson
+from .utils import _apply_matrix, _commutator, _matrix_exp
 
 Tensor = torch.Tensor
 TimeSpan = Union[Tuple[float, float], List[float], torch.Tensor]
-
-# -----------------------------------------------------------------------------
-# Basic Utilities
-# -----------------------------------------------------------------------------
-
-def _commutator(A: Tensor, B: Tensor) -> Tensor:
-    """
-    Compute the commutator [A, B] = AB - BA.
-    
-    Args:
-        A: Tensor of shape (..., dim, dim)
-        B: Tensor of shape (..., dim, dim)
-        
-    Returns:
-        Tensor of shape (..., dim, dim)
-    """
-    return A @ B - B @ A
-
-
-def _matrix_exp(A: Tensor) -> Tensor:
-    """
-    Compute matrix exponential for batched square matrices.
-    
-    Args:
-        A: Tensor of shape (..., dim, dim)
-        
-    Returns:
-        Tensor of shape (..., dim, dim)
-    """
-    if A.size(-1) != A.size(-2):
-        raise ValueError("matrix_exp only supports square matrices")
-    return torch.linalg.matrix_exp(A)
-
-
-def _apply_matrix(U: Tensor, y: Tensor) -> Tensor:
-    """
-    Apply matrix or batch of matrices to vector or batch of vectors.
-    
-    Args:
-        U: Tensor of shape (..., *batch_shape, dim, dim) or (dim, dim)
-        y: Tensor of shape (..., *batch_shape, dim)
-        
-    Returns:
-        Tensor of shape (..., *batch_shape, dim)
-    """
-    return (U @ y.unsqueeze(-1)).squeeze(-1)
-
 
 def _prepare_functional_call(A_func_or_module: Union[Callable, nn.Module], params: Tensor = None) -> Tuple[Callable, Dict[str, Tensor]]:
     """
@@ -135,12 +89,6 @@ class BaseStepper(nn.Module):
         """
         raise NotImplementedError("step() must be implemented by subclasses.")
 
-def get_t_nodes(t0:torch.Tensor, h:torch.Tensor, c:torch.Tensor):
-    if t0.ndim == 0 and h.ndim == 0:
-        return t0 + c * h
-    else:
-        return (t0 + c.unsqueeze(-1) * h).reshape(-1)
-
 class Magnus2nd(BaseStepper):
     """Second-order Magnus integrator using midpoint rule."""
     order = 2
@@ -149,9 +97,8 @@ class Magnus2nd(BaseStepper):
     def forward(self, A: Callable[..., Tensor], t0: Union[Sequence[float], torch.Tensor, float], h: Union[Sequence[float], torch.Tensor, float], y0: Tensor) -> Tuple[Tensor, Tuple[Tensor, ...]]:
         t0 = torch.as_tensor(t0, dtype=y0.dtype, device=y0.device)
         h = torch.as_tensor(h, dtype=y0.dtype, device=y0.device)
-        c = torch.as_tensor(self.tablaeu.c, dtype=y0.dtype, device=y0.device)
         h_expanded = h.unsqueeze(-1).unsqueeze(-1)
-        t_nodes = get_t_nodes(t0, h, c)
+        t_nodes = self.tablaeu.get_t_nodes(t0, h)
 
         A1 = A(t_nodes)
         tend = t0+h
@@ -172,9 +119,8 @@ class Magnus4th(BaseStepper):
     def forward(self, A: Callable[..., Tensor], t0: Union[Sequence[float], torch.Tensor, float], h: Union[Sequence[float], torch.Tensor, float], y0: Tensor) -> Tuple[Tensor, Tuple[Tensor, ...]]:
         t0 = torch.as_tensor(t0, dtype=y0.dtype, device=y0.device)
         h = torch.as_tensor(h, dtype=y0.dtype, device=y0.device)
-        c = torch.as_tensor(self.tablaeu.c, dtype=y0.dtype, device=y0.device)
         h_expanded = h.unsqueeze(-1).unsqueeze(-1)
-        t_nodes = get_t_nodes(t0, h, c)
+        t_nodes = self.tablaeu.get_t_nodes(t0, h)
         
         A12 = A(t_nodes)
         tend = t0+h
@@ -201,9 +147,8 @@ class Magnus6th(BaseStepper):
     def forward(self, A: Callable[..., Tensor], t0: Union[Sequence[float], torch.Tensor, float], h: Union[Sequence[float], torch.Tensor, float], y0: Tensor) -> Tuple[Tensor, Tuple[Tensor, ...]]:
         t0 = torch.as_tensor(t0, dtype=y0.dtype, device=y0.device)
         h = torch.as_tensor(h, dtype=y0.dtype, device=y0.device)
-        c = torch.as_tensor(self.tablaeu.c, dtype=y0.dtype, device=y0.device)
         h_expanded = h.unsqueeze(-1).unsqueeze(-1)
-        t_nodes = get_t_nodes(t0, h, c)
+        t_nodes = self.tablaeu.get_t_nodes(t0, h)
 
         A123 = A(t_nodes)
         tend = t0+h
