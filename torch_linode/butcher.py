@@ -11,6 +11,51 @@ class ButcherTableau:
     order: int
     b_error: torch.Tensor = None
 
+    def clone(self, *args, **kwargs):
+        """
+        Creates a deep copy of the ButcherTableau instance.
+        This method is consistent with the `torch.Tensor.clone()` API.
+
+        All tensor attributes (c, b, a, b_error) are cloned, meaning new
+        tensors are created with the same values. This operation is differentiable.
+
+        Args:
+            *args: Positional arguments passed to every tensor's `.clone()` method.
+            **kwargs: Keyword arguments passed to every tensor's `.clone()` method.
+                     (e.g., memory_format=torch.preserve_format)
+
+        Returns:
+            ButcherTableau: A new ButcherTableau instance with cloned tensors.
+        """
+        return ButcherTableau(
+            c=self.c.clone(*args, **kwargs),
+            b=self.b.clone(*args, **kwargs),
+            a=self.a.clone(*args, **kwargs),
+            order=self.order,
+            b_error=self.b_error.clone(*args, **kwargs) if self.b_error is not None else None
+        )
+
+    def to(self, *args, **kwargs):
+        """
+        Performs ButcherTableau dtype and/or device conversion.
+        This method is consistent with the `torch.Tensor.to()` API.
+
+        Args:
+            *args: Positional arguments passed to every tensor's `.to()` method.
+            **kwargs: Keyword arguments passed to every tensor's `.to()` method.
+
+        Returns:
+            ButcherTableau: A new ButcherTableau instance with all tensors having the
+                            specified dtype and/or device.
+        """
+        return ButcherTableau(
+            c=self.c.to(*args, **kwargs),
+            b=self.b.to(*args, **kwargs),
+            a=self.a.to(*args, **kwargs),
+            order=self.order,
+            b_error=self.b_error.to(*args, **kwargs) if self.b_error is not None else None
+        )
+
 DOPRI5 = ButcherTableau(
     a=torch.tensor([
         [0, 0, 0, 0, 0, 0, 0],
@@ -43,15 +88,12 @@ RK4 = ButcherTableau(
     order=4
 )
 
-
-GL2 = ButcherTableau(
-    a=torch.tensor([
-        [1 / 4, 1 / 4 - math.sqrt(3) / 6],
-        [1 / 4 + math.sqrt(3) / 6, 1 / 4],
-    ], dtype=torch.float64),
-    b=torch.tensor([1 / 2, 1 / 2], dtype=torch.float64),
-    c=torch.tensor([1 / 2 - math.sqrt(3) / 6, 1 / 2 + math.sqrt(3) / 6], dtype=torch.float64),
-    order=4
+# Implicit Runge-Kutta Methods - Gauss-Legendre
+GL2 = ButcherTableau( # 1-stage, order 2 (Implicit Midpoint Rule)
+    a=torch.tensor([[1/2]], dtype=torch.float64),
+    b=torch.tensor([1], dtype=torch.float64),
+    c=torch.tensor([1/2], dtype=torch.float64),
+    order=2
 )
 
 GL4 = ButcherTableau(

@@ -15,8 +15,8 @@ def _apply_matrix(U: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 class Collocation(nn.Module):
     def __init__(self, tableau: ButcherTableau):
         super().__init__()
-        self.tableau = tableau
-        self.order = 2 * tableau.c.shape[0]
+        self.tableau = tableau.clone()
+        self.order = tableau.order
 
     def forward(self, A: Callable[..., torch.Tensor], t0: Union[Sequence[float], torch.Tensor, float], h: Union[Sequence[float], torch.Tensor, float], y0: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         # Ensure tensors are on the correct device and dtype
@@ -24,7 +24,8 @@ class Collocation(nn.Module):
         h_tensor = torch.as_tensor(h, device=y0.device, dtype=y0.dtype)
 
         # Get Butcher tableau coefficients
-        c, b, a_matrix = self.tableau.c.to(y0.device), self.tableau.b.to(y0.device), self.tableau.a.to(y0.device)
+        self.tableau = self.tableau.to(dtype=y0.dtype, device=y0.device)
+        c, b, a_matrix = self.tableau.c, self.tableau.b, self.tableau.a
         num_stages = c.shape[0]
         
         # 1. Calculate collocation time points
@@ -41,7 +42,7 @@ class Collocation(nn.Module):
             A_nodes_flat, g_nodes_flat = A_nodes_out, None
 
         # Reshape evaluated matrices and vectors to match batch dimensions
-        *batch_shape, d = y0.shape
+        d = y0.shape[-1]
         eval_batch_shape = torch.broadcast_shapes(y0.shape[:-1], h_tensor.shape)
 
         A_nodes = A_nodes_flat.view(*eval_batch_shape, num_stages, d, d)

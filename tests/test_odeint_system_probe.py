@@ -5,7 +5,8 @@ from torch_linode.solvers import odeint
 class TestOdeintSystemProbe:
     def test_homogeneous_system_probe(self):
         def system_func_homogeneous(t, params):
-            return torch.eye(2)
+            t = torch.as_tensor(t)
+            return torch.eye(2).expand(*t.shape, 2, 2)
 
         y0 = torch.zeros(2)
         t = torch.tensor([0.0, 1.0])
@@ -20,7 +21,8 @@ class TestOdeintSystemProbe:
         def system_func_nonhomogeneous(t, params):
             A = torch.eye(2)
             g = torch.ones(2)
-            return A, g
+            t = torch.as_tensor(t)
+            return A.expand(*t.shape, 2, 2), g.expand(*t.shape, 2)
 
         y0 = torch.zeros(2)
         t = torch.tensor([0.0, 1.0])

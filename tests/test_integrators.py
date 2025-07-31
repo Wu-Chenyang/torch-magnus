@@ -459,18 +459,20 @@ def test_tolerance_settings(method, order):
     results = []
     all_passed = True
 
-    print("  Solver   | Tolerance | Final Error vs. Analytical | Status")
+    print("  Solver    | Steps | Tolerance | Final Error vs. Analytical | Status")
     print("  " + "-" * 60)
 
     for tol in tolerances:
         rtol = 0.1 * tol
         atol = tol
         # 3. 使用 odeint 进行求解
-        y_final = odeint(
+        ys, ys_traj, ts_traj = odeint(
             A_func, y0, t_span, 
             method=method, rtol=rtol, atol=atol, # 设置求解器的容差
-            order=order  # 使用4阶方法
-        )[..., -1, :]
+            order=order,
+            return_traj=True
+        )
+        y_final = ys[..., -1, :]
 
         # 4. 计算与解析解的误差
         y_analytical_final = analytical_solution(T)
@@ -484,7 +486,7 @@ def test_tolerance_settings(method, order):
         
         results.append({'tol': tolerance, 'error': error, 'passed': passed})
         status = "PASSED" if passed else "FAILED"
-        print(f"  {method} O{order} | {tolerance:9.1e} | {error:11.2e}               | {status}")
+        print(f"  {method} O{order} | {ts_traj.shape[-1]:5} | {tolerance:9.1e} | {error:12.2e}               | {status}")
 
     # 5a. 验证误差是否随着容差的减小而单调递减
     errors = [r['error'] for r in results]
