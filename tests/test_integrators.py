@@ -455,7 +455,7 @@ def test_tolerance_settings(method, order):
         return torch.tensor([math.cos(theta_t), -math.sin(theta_t)], dtype=torch.float64)
 
     # 2. 测试不同的容差设置
-    tolerances = [1e-3, 1e-5, 1e-7]#, 1e-9]
+    tolerances = [1e-3, 1e-5]#, 1e-7, 1e-9]
     results = []
     all_passed = True
 

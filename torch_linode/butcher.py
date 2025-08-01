@@ -61,7 +61,7 @@ class ButcherTableau:
         if t0.ndim == 0 and h.ndim == 0:
             return t0 + self.c * h
         else:
-            return (t0 + self.c.unsqueeze(-1) * h).reshape(-1)
+            return (t0.unsqueeze(-1) + self.c * h.unsqueeze(-1)).reshape(-1)
 
 DOPRI5 = ButcherTableau(
     a=torch.tensor([

@@ -92,42 +92,53 @@ class BaseStepper(nn.Module):
 class Magnus2nd(BaseStepper):
     """Second-order Magnus integrator using midpoint rule."""
     order = 2
-    tablaeu = GL2.clone()
+    tableau = GL2.clone()
 
     def forward(self, A: Callable[..., Tensor], t0: Union[Sequence[float], torch.Tensor, float], h: Union[Sequence[float], torch.Tensor, float], y0: Tensor) -> Tuple[Tensor, Tuple[Tensor, ...]]:
         t0 = torch.as_tensor(t0, dtype=y0.dtype, device=y0.device)
         h = torch.as_tensor(h, dtype=y0.dtype, device=y0.device)
+        h = h.reshape(torch.broadcast_shapes(h.shape, t0.shape))
+        t_nodes = self.tableau.get_t_nodes(t0, h)
+
+        A = A(t_nodes)
+        y_next = self.get_next_y(A, h, y0)
+
+        return y_next
+    
+    def get_next_y(self, A: Tensor, h: Union[Sequence[float], torch.Tensor, float], y0: Tensor) -> Tensor:
+        if h.ndim == 0:
+            A = A.squeeze(-3)
+
         h_expanded = h.unsqueeze(-1).unsqueeze(-1)
-        t_nodes = self.tablaeu.get_t_nodes(t0, h)
-
-        A1 = A(t_nodes)
-        tend = t0+h
-        if tend.ndim == 0:
-            A1 = A1.squeeze(-3)
-
-        Omega = h_expanded * A1
+        Omega = h_expanded * A
         U = _matrix_exp(Omega)
         y_next = _apply_matrix(U, y0)
-        return y_next, A1.unsqueeze(0)
+        return y_next
 
 class Magnus4th(BaseStepper):
     """Fourth-order Magnus integrator using two-point Gauss quadrature."""
     order = 4
-    tablaeu = GL4.clone()
+    tableau = GL4.clone()
     _sqrt3 = math.sqrt(3.0)
 
     def forward(self, A: Callable[..., Tensor], t0: Union[Sequence[float], torch.Tensor, float], h: Union[Sequence[float], torch.Tensor, float], y0: Tensor) -> Tuple[Tensor, Tuple[Tensor, ...]]:
         t0 = torch.as_tensor(t0, dtype=y0.dtype, device=y0.device)
         h = torch.as_tensor(h, dtype=y0.dtype, device=y0.device)
-        h_expanded = h.unsqueeze(-1).unsqueeze(-1)
-        t_nodes = self.tablaeu.get_t_nodes(t0, h)
+        h = h.reshape(torch.broadcast_shapes(h.shape, t0.shape))
+        t_nodes = self.tableau.get_t_nodes(t0, h)
         
-        A12 = A(t_nodes)
-        tend = t0+h
-        A1, A2 = A12.split(tend.numel(), dim=-3)
-        if tend.ndim == 0:
+        A = A(t_nodes)
+        y_next = self.get_next_y(A, h, y0)
+        
+        return y_next
+
+    def get_next_y(self, A: Tensor, h: Union[Sequence[float], torch.Tensor, float], y0: Tensor) -> Tensor:
+        A = A.reshape(A.shape[:-3] + (-1, 2) + A.shape[-2:])
+        A1, A2 = A[..., 0, :, :], A[..., 1, :, :]
+        if h.ndim == 0:
             A1, A2 = A1.squeeze(-3), A2.squeeze(-3)
         
+        h_expanded = h.unsqueeze(-1).unsqueeze(-1)
         alpha1 = h_expanded / 2.0 * (A1 + A2)
         alpha2 = h_expanded * self._sqrt3 * (A2 - A1)
         
@@ -135,27 +146,32 @@ class Magnus4th(BaseStepper):
         
         U = _matrix_exp(Omega)
         y_next = _apply_matrix(U, y0)
-        
-        return y_next, torch.stack((A1, A2), dim=0)
+        return y_next
 
 class Magnus6th(BaseStepper):
     """Sixth-order Magnus integrator using three-point Gauss quadrature."""
     order = 6
-    tablaeu = GL6.clone()
+    tableau = GL6.clone()
     _sqrt15 = math.sqrt(15.0)
 
     def forward(self, A: Callable[..., Tensor], t0: Union[Sequence[float], torch.Tensor, float], h: Union[Sequence[float], torch.Tensor, float], y0: Tensor) -> Tuple[Tensor, Tuple[Tensor, ...]]:
         t0 = torch.as_tensor(t0, dtype=y0.dtype, device=y0.device)
         h = torch.as_tensor(h, dtype=y0.dtype, device=y0.device)
-        h_expanded = h.unsqueeze(-1).unsqueeze(-1)
-        t_nodes = self.tablaeu.get_t_nodes(t0, h)
+        h = h.reshape(torch.broadcast_shapes(h.shape, t0.shape))
+        t_nodes = self.tableau.get_t_nodes(t0, h)
 
-        A123 = A(t_nodes)
-        tend = t0+h
-        A1, A2, A3 = A123.split(tend.numel(), dim=-3)
-        if tend.ndim == 0:
+        A = A(t_nodes)
+        y_next = self.get_next_y(A, h, y0)
+        
+        return y_next
+
+    def get_next_y(self, A: Tensor, h: Union[Sequence[float], torch.Tensor, float], y0: Tensor) -> Tensor:
+        A = A.reshape(A.shape[:-3] + (-1, 3) + A.shape[-2:])
+        A1, A2, A3 = A[..., 0, :, :], A[..., 1, :, :], A[..., 2, :, :]
+        if h.ndim == 0:
             A1, A2, A3 = A1.squeeze(-3), A2.squeeze(-3), A3.squeeze(-3)
 
+        h_expanded = h.unsqueeze(-1).unsqueeze(-1)
         alpha1 = h_expanded * A2
         alpha2 = h_expanded * self._sqrt15 / 3.0 * (A3 - A1)
         alpha3 = h_expanded * 10.0 / 3.0 * (A1 - 2 * A2 + A3)
@@ -169,13 +185,12 @@ class Magnus6th(BaseStepper):
 
         U = _matrix_exp(Omega)
         y_next = _apply_matrix(U, y0)
-        
-        return y_next, torch.stack((A1, A2, A3), dim=0)
+        return y_next
 
 # -----------------------------------------------------------------------------
 # Adaptive Stepping
 # -----------------------------------------------------------------------------
-def _richardson_step(integrator, A_func, t: float, dt: float, y):
+def _richardson_step(integrator, sys_func, t: float, dt: float, y):
     """
     Performs a step using Richardson extrapolation for adaptive step sizing.
 
@@ -185,7 +200,7 @@ def _richardson_step(integrator, A_func, t: float, dt: float, y):
 
     Args:
         integrator: The Magnus integrator instance.
-        A_func: The matrix function A(t).
+        sys_func: The function returning A(t) or (A(t), g(t)).
         t: Current time.
         dt: Current step size.
         y: Current solution tensor.
@@ -194,21 +209,46 @@ def _richardson_step(integrator, A_func, t: float, dt: float, y):
         A tuple containing:
         - y_next (Tensor): Higher-order solution estimate (extrapolated).
         - err (Tensor): Norm of the estimated local error.
-        - A_nodes_step (Tensor): Matrix values at quadrature nodes for the full step.
+        - A_nodes_step (Tensor): Matrix values at quadrature nodes
+        - g_nodes_step (Tensor): Vectors values at quadrature nodes
+        - t_nodes_step (Tensor): Time values at quadrature nodes
     """
+
+    t = torch.as_tensor(t, dtype=y.dtype, device=y.device)
+    dt = torch.as_tensor(dt, dtype=y.dtype, device=y.device)
     dt_half = 0.5 * dt
-    output = integrator(A_func, t, torch.as_tensor([dt, dt_half], dtype=y.dtype, device=y.device), y.unsqueeze(-2))
-    y, A_nodes = output[0], output[1]
-    y_big, y_half = y[..., 0, :], y[..., 1, :]
-    A_nodes_step = A_nodes[..., 0, :, :]
-    output = integrator(A_func, t + dt_half, dt_half, y_half)
-    y_small, A_nodes_small = output[0], output[1]
-    
+
+    big_t_nodes = integrator.tableau.get_t_nodes(t, dt)
+    half_t_nodes = integrator.tableau.get_t_nodes(t, dt_half)
+    small_t_nodes = integrator.tableau.get_t_nodes(t+dt_half, dt_half)
+    t_nodes = torch.cat([big_t_nodes, half_t_nodes, small_t_nodes], dim=0)
+
+    sys_nodes = sys_func(t_nodes)
+
+    is_nonhomogeneous = isinstance(sys_nodes, tuple) and len(sys_nodes) == 2
+    if is_nonhomogeneous:
+        A_nodes_flat, g_nodes_flat = sys_nodes
+    else:
+        A_nodes_flat, g_nodes_flat = sys_nodes, None
+
+    g_nodes = None
+    A_nodes = A_nodes_flat.reshape(A_nodes_flat.shape[:-3] + (3, -1) + A_nodes_flat.shape[-2:])
+    if g_nodes_flat is not None:
+        g_nodes = g_nodes_flat.view(g_nodes_flat.shape[:-2] + (3, -1) + g_nodes_flat.shape[-1:])
+
+        y_bighalf = integrator.get_next_y((A_nodes[..., 0:2, :, :, :].flatten(start_dim=-4, end_dim=-3), g_nodes[..., 0:2, :, :].flatten(start_dim=-3, end_dim=-2)), torch.stack([dt, dt_half]), y.unsqueeze(-2))
+        y_big, y_half = y_bighalf[..., 0, :], y_bighalf[..., 1, :]
+        y_small = integrator.get_next_y((A_nodes[..., 2, :, :, :], g_nodes[..., 2, :, :]), dt_half, y_half)
+    else:
+        y_bighalf = integrator.get_next_y(A_nodes[..., 0:2, :, :, :].flatten(start_dim=-4, end_dim=-3), torch.stack([dt, dt_half]), y.unsqueeze(-2))
+        y_big, y_half = y_bighalf[..., 0, :], y_bighalf[..., 1, :]
+        y_small = integrator.get_next_y(A_nodes[..., 2, :, :, :], dt_half, y_half)
+
     # Richardson extrapolation for a higher-order solution and error estimation
     y_extrap = y_small + (y_small - y_big) / (2**integrator.order - 1)
     err = torch.norm(y_extrap - y_big, dim=-1)
     
-    return y_extrap, err, A_nodes_step
+    return y_extrap, err, t_nodes-t, A_nodes_flat, g_nodes_flat
 
 # -----------------------------------------------------------------------------
 # Dense Output (Continuous Extension)
@@ -276,35 +316,35 @@ class DenseOutputNaive:
         h_new = t_batch - t0
 
         # Perform a single integration step for each point
-        y_interp, _ = self.integrator(self.A_func, t0, h_new, y0)
+        y_interp = self.integrator(self.A_func, t0, h_new, y0)
         
         return y_interp
 
 class CollocationDenseOutput:
-    """
-    Efficient, s-order (for s function evaluation) dense output using polynomial interpolation of the generator
-    based on cached Gauss-Legendre node evaluations.
-    """
-    def __init__(self, ys: Tensor, ts: Tensor, A_nodes_traj: List[Tuple[Tensor, ...]], order: int):
+    def __init__(self, ys: Tensor, ts: Tensor, t_nodes_traj: Tensor, A_nodes_traj: Tensor, g_nodes_traj: Union[None, Tensor], order: int):
         self.order = order
-        self.ys = ys
-        self.ts = ts
-        self.hs = ts[1:] - ts[:-1]
-        self.A_nodes_traj = A_nodes_traj
+        self.ys = ys # [*batch_shape, n_intervals+1, dim]
+        self.ts = ts # [n_intervals+1]
+        self.hs = ts[1:] - ts[:-1] # [n_intervals]
+        self.t_nodes_traj = t_nodes_traj # [s_nodes, n_intervals]
+        self.A_nodes_traj = A_nodes_traj # [*batch_shape, s_nodes, n_intervals, dim, dim]
+        self.g_nodes_traj = g_nodes_traj # [*batch_shape, s_nodes, n_intervals, dim]
 
         if self.ts[0] > self.ts[-1]:
             self.ts = torch.flip(self.ts, dims=[0])
             self.ys = torch.flip(self.ys, dims=[-2])
             self.hs = torch.flip(self.hs, dims=[0])
+            self.t_nodes_traj = torch.flip(self.t_nodes_traj, dims=[-1])
             self.A_nodes_traj = torch.flip(self.A_nodes_traj, dims=[-3])
+            if self.g_nodes_traj is not None:
+                self.g_nodes_traj = torch.flip(self.g_nodes_traj, dims=[-2])
 
-        if order not in [2, 4, 6]:
-            raise ValueError(f"Efficient dense output not implemented for order {order}")
 
     def __call__(self, t_batch: Tensor) -> Tensor:
         """
         Evaluate solution at given time points using pre-computed data.
         """
+        t_batch = torch.as_tensor(t_batch, dtype=self.ts.dtype, device=self.ts.device)
         indices = torch.searchsorted(self.ts, t_batch, right=True) - 1
         indices = torch.clamp(indices, 0, len(self.ts) - 2)
 
@@ -312,83 +352,83 @@ class CollocationDenseOutput:
         h = self.hs[indices]
         if indices.ndim == 0:
             y0 = self.ys[..., indices, :]
+            y1 = self.ys[..., 1+indices, :]
+            t_nodes = self.t_nodes_traj[:, indices]
             A_nodes = self.A_nodes_traj[..., indices, :, :]
+            g_nodes = self.g_nodes_traj[..., indices, :] if self.g_nodes_traj is not None else None
         else:
-            y0 = torch.gather(self.ys, -2, indices.unsqueeze(-1).expand((*self.ys.shape[:-2], indices.shape[0], self.ys.shape[-1])))
-            A_nodes = torch.gather(self.A_nodes_traj, -3, indices.unsqueeze(-1).unsqueeze(-1).expand((*self.A_nodes_traj.shape[:-3], indices.shape[0], *self.A_nodes_traj.shape[-2:])))
+            y0 = torch.gather(self.ys, -2, indices.unsqueeze(-1).expand(self.ys.shape[:-2] + (indices.shape[0], self.ys.shape[-1])))
+            y1 = torch.gather(self.ys, -2, 1+indices.unsqueeze(-1).expand(self.ys.shape[:-2] + (indices.shape[0], self.ys.shape[-1])))
+            t_nodes = torch.gather(self.t_nodes_traj, -1, indices.expand((self.t_nodes_traj.shape[0], indices.shape[0])))
+            A_nodes = torch.gather(self.A_nodes_traj, -3, indices.unsqueeze(-1).unsqueeze(-1).expand(self.A_nodes_traj.shape[:-3] + (indices.shape[0],) + self.A_nodes_traj.shape[-2:]))
+            g_nodes = torch.gather(self.g_nodes_traj, -2, indices.unsqueeze(-1).expand(self.g_nodes_traj.shape[:-2] + (indices.shape[0], self.g_nodes_traj.shape[-1]))) if self.g_nodes_traj is not None else None
         
-        # Normalize time to theta in [0, 1]
-        theta = (t_batch - t0) / h
+        # 2. Define system parameters
+        # ode_batch_shape: The batch shape of the ODE system itself.
+        # t_batch_shape: The batch shape of the evaluation time points.
+        # batch_shape: The combined batch shape for the output.
+        ode_batch_shape = self.ys.shape[:-2]
+        t_batch_shape = t_batch.shape
+        batch_shape = ode_batch_shape + t_batch_shape
+        dim = self.ys.shape[-1]
+        n_stages = self.t_nodes_traj.shape[0]
+        poly_degree = n_stages + 1
+        n_coeffs = poly_degree + 1
+
+        # 3. Build M and D for the linear system
+        # M should have shape (*batch_shape, n_coeffs * dim, n_coeffs * dim)
+        # D should have shape (*batch_shape, n_coeffs * dim)
+        eye = torch.eye(dim, dtype=y0.dtype, device=y0.device)
+        M = eye.repeat(*batch_shape, n_coeffs, n_coeffs).reshape(*batch_shape, n_coeffs, dim, n_coeffs, dim)
+        D = torch.zeros(batch_shape + (n_coeffs * dim,), dtype=y0.dtype, device=y0.device)
+
+        # Eq 1: y(t_a) = y_0
+        # Formula: M_1j = t_a^j * I. With t_a=0, this is I for j=0 and 0 otherwise.
+        # D_1 = y_a
+        M[..., 0, :, 1:, :] = 0.0
+        D[..., :dim] = y0
+
+        # Eq 2: y(t_b) = y_1
+        # Formula: M_2j = t_b^j * I. With t_b=h.
+        # D_2 = y_b
+        power = torch.pow(h.reshape(*t_batch_shape, 1, 1).expand(*t_batch_shape, 1, n_coeffs), torch.arange(n_coeffs).expand(*t_batch_shape, 1, n_coeffs)).unsqueeze(-1)
+        M[..., 1, :, :, :] *= power
+        D[..., dim:2*dim] = y1
+
+        # Eqs 3 to n+2: Collocation constraints y'(t_i) = A(t_i)y(t_i) + g(t_i)
+        # Formula: M_k0 = -A(t_i), M_kj = (j*t_i^(j-1)*I - t_i^j*A(t_i)) for j>0
+        # D_k = g(t_i)
+        if t_batch.ndim == 1:
+            t_nodes = t_nodes.transpose(0, 1)
+            A_nodes = A_nodes.transpose(-3, -4)
+            if g_nodes is not None:
+                g_nodes = g_nodes.transpose(-2, -3)
+
+        power = torch.pow(t_nodes.reshape(*t_batch_shape, n_stages, 1, 1).expand(*t_batch_shape, n_stages, 1, n_coeffs), torch.arange(n_coeffs).expand(*t_batch_shape, n_stages, 1, n_coeffs))
+        power[..., :-1]
+        coeff = torch.arange(n_coeffs)[1:] * power[..., :-1]
+        M[..., 2:, :, 1:, :] *= coeff.unsqueeze(-1)
+        M[..., 2:, :, 0, :] = 0.0
+        M[..., 2:, :, :, :] -= A_nodes.unsqueeze(-2) * power.unsqueeze(-1)
+        M = M.reshape(*batch_shape, n_coeffs*dim, n_coeffs*dim)
+        if g_nodes is not None:
+            D[..., 2*dim:] = g_nodes.flatten(start_dim=-2)
+            
+        # 4. Solve for coefficients and evaluate the polynomial
+        # C should have shape (*batch_shape, n_coeffs, dim)
+        C_flat = torch.linalg.solve(M, D)
+        C = C_flat.reshape(batch_shape + (n_coeffs, dim))
+
+        # t_eval should be broadcastable to batch_shape
+        t_eval = (t_batch - t0).view((1,) * len(ode_batch_shape) + t_batch_shape)
+
+        # y_interp should have shape (*batch_shape, dim)
+        y_interp = torch.zeros(batch_shape + (dim,), dtype=y0.dtype, device=y0.device)
+        for j in range(n_coeffs):
+            y_interp += C[..., j, :] * torch.pow(t_eval.unsqueeze(-1), j)
+            
+        return y_interp
         
-        # Add required dimensions for broadcasting with matrix shapes
-        h_exp = h.view(*h.shape, 1, 1)
-        theta_exp = theta.view(*theta.shape, 1, 1)
-
-        # Dispatch to the correct interpolation method
-        if self.order == 2:
-            A1_nodes = A_nodes[0]
-            Omega = self._interpolate_2nd(theta_exp, h_exp, A1_nodes)
-        elif self.order == 4:
-            A1_nodes = A_nodes[0]
-            A2_nodes = A_nodes[1]
-            Omega = self._interpolate_4th(theta_exp, h_exp, A1_nodes, A2_nodes)
-        elif self.order == 6:
-            A1_nodes = A_nodes[0]
-            A2_nodes = A_nodes[1]
-            A3_nodes = A_nodes[2]
-            Omega = self._interpolate_6th(theta_exp, h_exp, A1_nodes, A2_nodes, A3_nodes)
-
-        U = _matrix_exp(Omega)
-        return _apply_matrix(U, y0)
-
-    def _interpolate_2nd(self, theta, h, A1):
-        return theta * h * A1
-
-    def _interpolate_4th(self, theta, h, A1, A2):
-        sqrt3 = math.sqrt(3.0)
-        theta2 = theta.pow(2)
-        theta3 = theta.pow(3)
-
-        b01 = (0.5 + sqrt3 / 2) * theta - (sqrt3 / 2) * theta2
-        b02 = (0.5 - sqrt3 / 2) * theta + (sqrt3 / 2) * theta2
-
-        term1 = h * (A1 * b01 + A2 * b02)
-        term2 = (h.pow(2) * sqrt3 * theta3 / 12.0) * _commutator(A1, A2)
-        
-        return term1 - term2
-
-    def _interpolate_6th(self, theta, h, A1, A2, A3):
-        d = math.sqrt(15.0)
-        t2 = theta.pow(2)
-        t3 = theta.pow(3)
-
-        # Gamma polynomials
-        g11 = (5/6)*t3 - (5/3 + d/6)*t2 + (5/6 + d/6)*theta
-        g12 = (-5/3)*t3 + (10/3)*t2 - (2/3)*theta
-        g13 = (5/6)*t3 - (5/3 - d/6)*t2 + (5/6 - d/6)*theta
-
-        g21 = (10/3)*t3 - (10/3 + d/3)*t2
-        g22 = (-20/3)*t3 + (20/3)*t2
-        g23 = (10/3)*t3 - (10/3 - d/3)*t2
-
-        g31 = (10/3)*t3
-        g32 = (-20/3)*t3
-        g33 = (10/3)*t3
-
-        # Alpha terms
-        alpha1 = h * (A1*g11 + A2*g12 + A3*g13)
-        alpha2 = h * (A1*g21 + A2*g22 + A3*g23)
-        alpha3 = h * (A1*g31 + A2*g32 + A3*g33)
-
-        # Assemble Omega
-        C1 = _commutator(alpha1, alpha2)
-        C2 = -1/60 * _commutator(alpha1, 2 * alpha3 + C1)
-        term_in_comm = -20*alpha1 - alpha3 + C1
-        term_with_comm = alpha2 + C2
-        Omega = alpha1 + alpha3/12 + (1/240)*_commutator(term_in_comm, term_with_comm)
-        
-        return Omega
-    
 def merge_dense_outputs(dense_outputs: List[Union['DenseOutputNaive', 'CollocationDenseOutput']]) -> Union['DenseOutputNaive', 'CollocationDenseOutput']:
     """
     Merge multiple dense output instances with connected time intervals.
@@ -472,42 +512,54 @@ def _merge_collocation_dense_outputs(dense_outputs: List['CollocationDenseOutput
     first_output = dense_outputs[0]
     
     # Collect time grids, states, and cached data
-    merged_ts = [dense_outputs[0].ts]
-    merged_ys = [dense_outputs[0].ys]
-    merged_A_nodes = [dense_outputs[0].A_nodes_traj]
+    merged_ts = [first_output.ts]
+    merged_ys = [first_output.ys]
+    merged_t_nodes = [first_output.t_nodes_traj]
+    merged_A_nodes = [first_output.A_nodes_traj]
     
+    has_g_nodes = first_output.g_nodes_traj is not None
+    if has_g_nodes:
+        merged_g_nodes = [first_output.g_nodes_traj]
+
     for i in range(1, len(dense_outputs)):
-        # Skip the first time point of subsequent intervals (it's duplicate)
-        merged_ts.append(dense_outputs[i].ts[1:])
-        merged_ys.append(dense_outputs[i].ys[..., 1:, :])
+        next_output = dense_outputs[i]
         
-        # For A_nodes_traj, we skip the first interval since it corresponds to 
-        # the boundary point we're removing
-        if len(dense_outputs[i].A_nodes_traj.shape) > 3:
-            merged_A_nodes.append(dense_outputs[i].A_nodes_traj[..., :-1, :, :])
-        else:
-            merged_A_nodes.append(dense_outputs[i].A_nodes_traj[..., :-1, :, :])
-    
+        # Skip the first time point of subsequent intervals (it's a duplicate)
+        merged_ts.append(next_output.ts[1:])
+        merged_ys.append(next_output.ys[..., 1:, :])
+        
+        # For trajectory data, the number of intervals is ts.shape[0] - 1
+        # The shapes are:
+        # t_nodes_traj: [s_nodes, n_intervals]
+        # A_nodes_traj: [*batch, s_nodes, n_intervals, dim, dim]
+        # g_nodes_traj: [*batch, s_nodes, n_intervals, dim]
+        
+        # We concatenate along the interval dimension
+        merged_t_nodes.append(next_output.t_nodes_traj)
+        merged_A_nodes.append(next_output.A_nodes_traj)
+        if has_g_nodes:
+            if next_output.g_nodes_traj is None:
+                 raise ValueError("Inconsistent g_nodes_traj in dense_outputs to merge.")
+            merged_g_nodes.append(next_output.g_nodes_traj)
+
     # Concatenate along appropriate dimensions
     merged_t_grid = torch.cat(merged_ts, dim=0)
     merged_y_states = torch.cat(merged_ys, dim=-2)
     
-    # Handle A_nodes_traj concatenation - this is along the interval dimension
-    if isinstance(merged_A_nodes[0], torch.Tensor):
-        merged_A_nodes_traj = torch.cat(merged_A_nodes, dim=-3)
-    else:
-        # If it's a list of tuples, concatenate each component
-        num_components = len(merged_A_nodes[0])
-        concatenated_components = []
-        for comp_idx in range(num_components):
-            comp_data = [nodes[comp_idx] for nodes in merged_A_nodes]
-            concatenated_components.append(torch.cat(comp_data, dim=-3))
-        merged_A_nodes_traj = tuple(concatenated_components)
+    # Concatenate trajectory data along the interval dimension
+    merged_t_nodes_traj = torch.cat(merged_t_nodes, dim=-1)
+    merged_A_nodes_traj = torch.cat(merged_A_nodes, dim=-3)
     
+    merged_g_nodes_traj = None
+    if has_g_nodes:
+        merged_g_nodes_traj = torch.cat(merged_g_nodes, dim=-2)
+
     return CollocationDenseOutput(
         ys=merged_y_states,
         ts=merged_t_grid,
+        t_nodes_traj=merged_t_nodes_traj,
         A_nodes_traj=merged_A_nodes_traj,
+        g_nodes_traj=merged_g_nodes_traj,
         order=first_output.order
     )
 
@@ -570,7 +622,7 @@ def adaptive_ode_solve(
     dt = t1 - t0
     t, y = t0, y0.clone()
     ts, ys = [t], [y]
-    A_nodes_traj = []
+    t_nodes_traj, A_nodes_traj, g_nodes_traj = [], [], []
     step_cnt = 0
 
     while (t - t1) * dt < 0:
@@ -579,7 +631,7 @@ def adaptive_ode_solve(
         if (t + dt - t1) * dt > 0:
             dt = t1 - t
 
-        y_next, err, A_nodes_step = _richardson_step(
+        y_next, err, t_nodes_step, A_nodes_step, g_nodes_step = _richardson_step(
             integrator, A_func_bound, t, dt, y
         )
 
@@ -592,19 +644,21 @@ def adaptive_ode_solve(
                 ts.append(t+dt)
                 ys.append(y)
                 if dense_output:
+                    t_nodes_traj.append(t_nodes_step)
                     A_nodes_traj.append(A_nodes_step)
+                    g_nodes_traj.append(g_nodes_step)
             t += dt
 
         safety, fac_min, fac_max = 0.9, 0.2, 5.0
         
         # Add small epsilon to err for numerical stability
-        err_safe = err + 1e-16
+        err_safe = err + torch.finfo(err.dtype).eps
         
         # Calculate step size adjustment factors for all systems
         factors = safety * (tol / err_safe).pow(1.0 / (integrator.order + 1))
         
         # Choose the most conservative (smallest) factor to ensure safety for all systems
-        factor = torch.min(factors)
+        factor = torch.min(factors).item()
         
         dt = dt * float(max(fac_min, min(fac_max, factor)))
         
@@ -617,8 +671,10 @@ def adaptive_ode_solve(
 
         if dense_output:
             if dense_output_method == 'collocation':
+                t_nodes_out = torch.stack(t_nodes_traj, dim=-1)
                 A_nodes_out = torch.stack(A_nodes_traj, dim=-3)
-                dense_sol = CollocationDenseOutput(ys_out, ts_out, A_nodes_out, order)
+                g_nodes_out = torch.stack(g_nodes_traj, dim=-2) if g_nodes_traj[0] is not None else None
+                dense_sol = CollocationDenseOutput(ys_out, ts_out, t_nodes_out, A_nodes_out, g_nodes_out, order)
             else:
                 dense_sol = DenseOutputNaive(ys_out, ts_out, order, A_func_bound, method)
 

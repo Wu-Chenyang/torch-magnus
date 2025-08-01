@@ -26,7 +26,8 @@ def analytical_solution(t):
 
 @pytest.mark.parametrize("order", [2, 4, 6])
 @pytest.mark.parametrize("rtol", [1e-4, 1e-6])
-def test_interpolation_accuracy(order, rtol):
+@pytest.mark.parametrize("dense_output_method", ["naive", "collocation"])
+def test_interpolation_accuracy(order, rtol, dense_output_method):
     """
     Tests the accuracy of the dense output interpolation for a highly oscillatory system.
 
@@ -35,7 +36,7 @@ def test_interpolation_accuracy(order, rtol):
     3. Compares the interpolated solution to the analytical solution.
     4. Checks that the interpolation error is reasonably low.
     """
-    print(f"\nTesting interpolation accuracy for order={order}, rtol={rtol}")
+    print(f"\nTesting interpolation accuracy for order={order}, rtol={rtol}, interpolation method={dense_output_method}")
 
     # Initial conditions and time span for the solver
     y0 = torch.tensor([1.0, 0.0], dtype=torch.float64)
@@ -50,7 +51,8 @@ def test_interpolation_accuracy(order, rtol):
         order=order,
         rtol=rtol,
         atol=rtol * 1e-1,
-        dense_output=True
+        dense_output=True,
+        dense_output_method=dense_output_method
     )
 
     # Fine grid for evaluating the interpolation
