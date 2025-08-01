@@ -1,6 +1,6 @@
 import torch
 import pytest
-from torch_linode.solvers import odeint, merge_dense_outputs
+from torch_linode.solvers import odeint, _merge_collocation_dense_outputs
 
 # Define a simple time-varying linear ODE system
 def system_func(t, params):
@@ -15,7 +15,8 @@ def system_func(t, params):
     return A, g
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-def test_merged_collocation_dense_output(dtype):
+@pytest.mark.parametrize("dense_mode", ["precompute", "ondemand"])
+def test_merged_collocation_dense_output(dtype, dense_mode):
     """Tests the merged CollocationDenseOutput for a non-homogeneous system."""
     y0 = torch.tensor([1.0, 0.0], dtype=dtype)
     
@@ -28,19 +29,19 @@ def test_merged_collocation_dense_output(dtype):
     atol = 1e-6
     dense_output1 = odeint(
         system_func, y0, t_span1, 
-        method='glrk', order=4, dense_output=True, dense_output_method='collocation',
+        method='glrk', order=4, dense_output=True, dense_output_method='collocation_ondemand',
         rtol=rtol, atol=atol
     )
     y1_end = dense_output1(t_span1[-1])
     
     dense_output2 = odeint(
         system_func, y1_end, t_span2, 
-        method='glrk', order=4, dense_output=True, dense_output_method='collocation',
+        method='glrk', order=4, dense_output=True, dense_output_method='collocation_ondemand',
         rtol=rtol, atol=atol
     )
 
     # Merge them
-    merged_dense_output = merge_dense_outputs([dense_output1, dense_output2])
+    merged_dense_output = _merge_collocation_dense_outputs([dense_output1, dense_output2], dense_mode)
 
     # --- Verification ---
     # 1. Check if the time grid of the merged output is correct

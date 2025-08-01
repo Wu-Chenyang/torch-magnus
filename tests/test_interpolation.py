@@ -26,7 +26,7 @@ def analytical_solution(t):
 
 @pytest.mark.parametrize("order", [2, 4, 6])
 @pytest.mark.parametrize("rtol", [1e-4, 1e-6])
-@pytest.mark.parametrize("dense_output_method", ["naive", "collocation"])
+@pytest.mark.parametrize("dense_output_method", ["naive", "collocation_precompute", "collocation_ondemand"])
 def test_interpolation_accuracy(order, rtol, dense_output_method):
     """
     Tests the accuracy of the dense output interpolation for a highly oscillatory system.
@@ -41,7 +41,7 @@ def test_interpolation_accuracy(order, rtol, dense_output_method):
     # Initial conditions and time span for the solver
     y0 = torch.tensor([1.0, 0.0], dtype=torch.float64)
     # Use a coarse grid to force the solver to take larger steps
-    t_span = torch.linspace(0, 0.5, 10, dtype=torch.float64)
+    t_span = torch.tensor([0., 0.5], dtype=torch.float64)
 
     # Solve the ODE and request dense output
     solution = odeint(
@@ -69,7 +69,7 @@ def test_interpolation_accuracy(order, rtol, dense_output_method):
 
     # Set a realistic error threshold for interpolation
     # Interpolation error is expected to be higher than solver step error
-    error_threshold = 100 * (rtol * 1e-1 + rtol * torch.norm(y_analytical, dim=-1))
+    error_threshold = (rtol * 1e-1 + rtol * torch.norm(y_analytical, dim=-1))
 
     print(f"  Max interpolation error: {interpolation_error.max().item():.2e}")
     print(f"  Max error threshold: {error_threshold.max().item():.2e}")

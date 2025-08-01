@@ -7,7 +7,7 @@ from .butcher import GL2, GL4, GL6
 from .stepper import Collocation, Magnus2nd, Magnus4th, Magnus6th
 from .quadrature import AdaptiveGaussKronrod, FixedSimpson
 from .utils import _apply_matrix
-from .dense_output import CollocationDenseOutput, DenseOutputNaive, merge_dense_outputs
+from .dense_output import CollocationDenseOutput, DenseOutputNaive, _merge_collocation_dense_outputs, _merge_naive_dense_outputs
 
 Tensor = torch.Tensor
 TimeSpan = Union[Tuple[float, float], List[float], torch.Tensor]
@@ -95,13 +95,13 @@ def _richardson_step(integrator, sys_func, t: float, dt: float, y):
     small_t_nodes = integrator.tableau.get_t_nodes(t+dt_half, dt_half)
     t_nodes = torch.cat([big_t_nodes, half_t_nodes, small_t_nodes], dim=0)
 
-    sys_nodes = sys_func(t_nodes)
+    syn_stages = sys_func(t_nodes)
 
-    is_nonhomogeneous = isinstance(sys_nodes, tuple) and len(sys_nodes) == 2
+    is_nonhomogeneous = isinstance(syn_stages, tuple) and len(syn_stages) == 2
     if is_nonhomogeneous:
-        A_nodes_flat, g_nodes_flat = sys_nodes
+        A_nodes_flat, g_nodes_flat = syn_stages
     else:
-        A_nodes_flat, g_nodes_flat = sys_nodes, None
+        A_nodes_flat, g_nodes_flat = syn_stages, None
 
     g_nodes = None
     A_nodes = A_nodes_flat.reshape(A_nodes_flat.shape[:-3] + (3, -1) + A_nodes_flat.shape[-2:])
@@ -120,7 +120,7 @@ def _richardson_step(integrator, sys_func, t: float, dt: float, y):
     y_extrap = y_small + (y_small - y_big) / (2**integrator.order - 1)
     err = torch.norm(y_extrap - y_big, dim=-1)
     
-    return y_extrap, err, t_nodes-t, A_nodes_flat, g_nodes_flat
+    return y_extrap, err, t_nodes, A_nodes_flat, g_nodes_flat
 
 # -----------------------------------------------------------------------------
 # ODE Solver Interface
@@ -229,13 +229,17 @@ def adaptive_ode_solve(
         ts_out = torch.tensor(ts, device=y0.device, dtype=y0.dtype)
 
         if dense_output:
-            if dense_output_method == 'collocation':
+            if dense_output_method.startswith('collocation'):
+                if 'ondemand' in dense_output_method:
+                    dense_mode = 'ondemand'
+                else:
+                    dense_mode = 'precompute'
                 t_nodes_out = torch.stack(t_nodes_traj, dim=-1)
                 A_nodes_out = torch.stack(A_nodes_traj, dim=-3)
                 g_nodes_out = torch.stack(g_nodes_traj, dim=-2) if g_nodes_traj[0] is not None else None
-                dense_sol = CollocationDenseOutput(ys_out, ts_out, t_nodes_out, A_nodes_out, g_nodes_out, order)
+                dense_sol = CollocationDenseOutput(ts_out, ys_out, t_nodes_out, A_nodes_out, g_nodes_out, order, dense_mode=dense_mode)
             else:
-                dense_sol = DenseOutputNaive(ys_out, ts_out, order, A_func_bound, method)
+                dense_sol = DenseOutputNaive(ts_out, ys_out, order, A_func_bound, method)
 
         if return_traj and dense_output:
             return dense_sol, ys_out, ts_out
@@ -245,12 +249,13 @@ def adaptive_ode_solve(
             return dense_sol
     return y
 
+
 def odeint(
     system_func_or_module: Union[Callable, nn.Module], y0: Tensor, t: Union[Sequence[float], torch.Tensor],
     params: Tensor = None,
     method: str = 'magnus', order: int = 4, rtol: float = 1e-6, atol: float = 1e-8,
     dense_output: bool = False,
-    dense_output_method: str = 'naive',
+    dense_output_method: str = 'collocation_precompute',
     return_traj: bool = False
 ) -> Union[Tensor, DenseOutputNaive, CollocationDenseOutput]:
     """
@@ -279,7 +284,7 @@ def odeint(
         atol: Absolute tolerance.
         dense_output: If True, return a `DenseOutput` object for interpolation.
                       Otherwise, return a tensor with solutions at time points `t`.
-        dense_output_method: Method for dense output ('naive' or 'collocation').
+        dense_output_method: Method for dense output ('naive', 'collocation_precompute', 'collocation_ondemand').
         return_traj: If True, return trajectory at all time steps
 
     Returns:
@@ -344,6 +349,12 @@ def odeint(
         sol_out = []
         y_curr = y_in
         ys_traj, ts_traj = [y_in.unsqueeze(-2)], [t_vec[0:1]]
+        if dense_output_method.startswith("collocation"):
+            if 'ondemand' in dense_output_method:
+                dense_mode = 'ondemand'
+            else:
+                dense_mode = 'precompute'
+            dense_output_method = "collocation_ondemand"
         for i in range(len(t_vec) - 1):
             t0, t1 = float(t_vec[i]), float(t_vec[i + 1])
             output = adaptive_ode_solve(
@@ -361,7 +372,10 @@ def odeint(
             sol_out.append(sol)
             y_curr = y_next
 
-        solution = merge_dense_outputs(sol_out)
+        if dense_output_method.startswith("collocation"):
+            solution = _merge_collocation_dense_outputs(sol_out, dense_mode)
+        else:
+            solution = _merge_naive_dense_outputs(sol_out)
     else:
         ys_out = [y_in]
         y_curr = y_in
