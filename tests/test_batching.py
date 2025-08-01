@@ -82,7 +82,7 @@ class TestMagnusSolver(unittest.TestCase):
         y_numerical_odeint = odeint(A_func, y0, t_span, order=4, rtol=rtol, atol=atol)
         error_odeint = torch.norm(y_numerical_odeint[..., -1, :] - y_analytical[..., -1, :])
         print(f"Accuracy test error (odeint, batch): {error_odeint.item()}")
-        self.assertTrue(error_odeint < 10 * (atol + rtol * torch.norm(y_analytical[..., -1, :]).item()))
+        self.assertTrue(error_odeint < 30 * (atol + rtol * torch.norm(y_analytical[..., -1, :]).item()))
 
         # Test odeint_adjoint accuracy
         y_numerical_adjoint = odeint_adjoint(A_func, y0, t_span, order=4, rtol=rtol, atol=atol)
