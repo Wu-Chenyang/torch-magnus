@@ -5,14 +5,14 @@ import torch.nn as nn
 
 from .butcher import GL2, GL4, GL6
 from .stepper import Collocation, Magnus2nd, Magnus4th, Magnus6th
-from .quadrature import AdaptiveGaussKronrod, FixedSimpson
+from .quadrature import GaussLegendreQuadrature
 from .utils import _apply_matrix
 from .dense_output import CollocationDenseOutput, DenseOutputNaive, _merge_collocation_dense_outputs, _merge_naive_dense_outputs
 
 Tensor = torch.Tensor
 TimeSpan = Union[Tuple[float, float], List[float], torch.Tensor]
 
-def _prepare_functional_call(A_func_or_module: Union[Callable, nn.Module], params: Tensor = None) -> Tuple[Callable, Dict[str, Tensor]]:
+def _prepare_functional_call(system_func_or_module: Union[Callable, nn.Module], params: Tensor = None) -> Tuple[Callable, Dict[str, Tensor]]:
     """
     Convert user input A_func (Module or Callable) to unified functional interface.
     
@@ -24,8 +24,8 @@ def _prepare_functional_call(A_func_or_module: Union[Callable, nn.Module], param
         functional_A_func: A function that accepts (t, p_dict)
         params_and_buffers_dict: Dictionary containing all parameters and buffers
     """
-    if isinstance(A_func_or_module, torch.nn.Module):
-        module = A_func_or_module
+    if isinstance(system_func_or_module, torch.nn.Module):
+        module = system_func_or_module
         # Combine parameters and buffers to support functional_call
         params_and_buffers = {
             **dict(module.named_parameters()),
@@ -39,13 +39,13 @@ def _prepare_functional_call(A_func_or_module: Union[Callable, nn.Module], param
         return functional_A_func, params_and_buffers
     else:
         # Handle legacy (Callable, params) interface
-        A_func = A_func_or_module
+        system_func = system_func_or_module
 
         if params is None:
             # System has no trainable parameters
             params_dict = {}
             def functional_A_func(t_val, p_dict):
-                return A_func(t_val, None)
+                return system_func(t_val, None)
             return functional_A_func, params_dict
 
         elif isinstance(params, torch.Tensor):
@@ -53,9 +53,11 @@ def _prepare_functional_call(A_func_or_module: Union[Callable, nn.Module], param
             params_dict = {'params': params}
             def functional_A_func(t_val, p_dict):
                 # Unpack from dictionary and call original function
-                return A_func(t_val, p_dict['params'])
+                return system_func(t_val, p_dict['params'])
             return functional_A_func, params_dict
         
+        elif isinstance(params, Dict):
+            return system_func, params
         else:
             raise TypeError(f"The 'params' argument must be a torch.Tensor or None, but got {type(params)}")
 
@@ -422,6 +424,16 @@ def odeint(
 # Decoupled Adjoint Method
 # -----------------------------------------------------------------------------
 
+class _AdjointSystem(nn.Module):
+    def __init__(self, original_sys_func):
+        super().__init__()
+        self.original_sys_func = original_sys_func
+
+    def forward(self, t_val, p_and_b_dict):
+        sys_out = self.original_sys_func(t_val, p_and_b_dict)
+        A = sys_out[0] if isinstance(sys_out, tuple) else sys_out
+        return -A.transpose(-1, -2)
+
 class _Adjoint(torch.autograd.Function):
     """Magnus integrator with memory-efficient adjoint gradient computation."""
     
@@ -430,66 +442,21 @@ class _Adjoint(torch.autograd.Function):
         # Reconstruct dictionary from unpacked arguments
         params_and_buffers_dict = dict(zip(param_keys, param_values))
         
-        t = t.to(y0.dtype)
-
-        # --- Probe system function to determine mode ---
         with torch.no_grad():
-            probe_result = functional_system_func(t[0], params_and_buffers_dict)
-
-        if isinstance(probe_result, torch.Tensor):
-            is_nonhomogeneous = False
-            solver_func = functional_system_func
-            y_in = y0
-        elif isinstance(probe_result, tuple) and len(probe_result) == 2:
-            is_nonhomogeneous = True
-            dim = y0.shape[-1]
-            
-            if method == 'glrk':
-                # For GLRK, pass the original functional_system_func (which returns (A, g))
-                solver_func = functional_system_func
-                y_in = y0 # y_in remains original y0
-                
-            elif method == 'magnus':
-                def augmented_B_func(t_val, p_dict_combined):
-                    A_t, g_t = functional_system_func(t_val, p_dict_combined)
-                    g_t = g_t.unsqueeze(-1)
-                    *batch_dims, _, _ = A_t.shape
-                    B_t = torch.zeros(*batch_dims, dim + 1, dim + 1, dtype=A_t.dtype, device=A_t.device)
-                    B_t[..., :dim, :dim] = A_t
-                    B_t[..., :dim, dim] = g_t.squeeze(-1)
-                    return B_t
-                
-                solver_func = augmented_B_func
-                ones = torch.ones_like(y0[..., :1])
-                y_in = torch.cat([y0, ones], dim=-1)
-            else:
-                raise ValueError(f"Unknown integration method: {method}")
-        else:
-            raise TypeError(f"System function must return a Tensor or a Tuple[Tensor, Tensor], but got {type(probe_result)}")
-
-        # --- Solve ODE and save context ---
-        with torch.no_grad():
-            y_dense_traj = adaptive_ode_solve(
-                y_in, (t[0], t[-1]), solver_func, params_and_buffers_dict, 
-                method=method, order=order, rtol=rtol, atol=atol, dense_output=True, dense_output_method=dense_output_method
-            )
-            y_traj_maybe_aug = y_dense_traj(t)
+            y_dense_traj = odeint(functional_system_func, y0, t, params_and_buffers_dict,  method=method, order=order, rtol=rtol, atol=atol, dense_output=True, dense_output_method=dense_output_method)
 
         # --- Save context for backward pass ---
-        ctx.dense_output_method = dense_output_method
-        ctx.is_nonhomogeneous = is_nonhomogeneous
-        ctx.functional_system_func = functional_system_func # Save original user func
+        ctx.functional_system_func = functional_system_func
         ctx.param_keys = param_keys
         ctx.method, ctx.order, ctx.rtol, ctx.atol = method, order, rtol, atol
         ctx.quad_method, ctx.quad_options = quad_method, quad_options
         ctx.y0_requires_grad = y0.requires_grad
-        
-        # For backward, we need the augmented trajectory for y and the original for a
-        ctx.y_dense_traj_aug = y_dense_traj 
+        ctx.dense_output_method = dense_output_method # Still needed for backward pass
+        ctx.y_dense_traj = y_dense_traj
         
         ctx.save_for_backward(t, *param_values)
         
-        return y_traj_maybe_aug[..., :-1] if is_nonhomogeneous and method == 'magnus' else y_traj_maybe_aug
+        return y_dense_traj(t)
 
     @staticmethod
     def backward(ctx, grad_y_traj: Tensor):
@@ -499,8 +466,7 @@ class _Adjoint(torch.autograd.Function):
         param_keys = ctx.param_keys
         method, order, rtol, atol = ctx.method, ctx.order, ctx.rtol, ctx.atol
         quad_method, quad_options = ctx.quad_method, ctx.quad_options
-        is_nonhomogeneous = ctx.is_nonhomogeneous
-        y_dense_traj_aug = ctx.y_dense_traj_aug
+        y_dense_traj = ctx.y_dense_traj
 
         # --- Reconstruct parameter dictionaries ---
         full_p_and_b_dict = dict(zip(param_keys, param_values))
@@ -509,64 +475,41 @@ class _Adjoint(torch.autograd.Function):
 
         if not params_req and not ctx.y0_requires_grad:
             num_params = len(param_values)
-            return (None,) * (10 + num_params)
+            return (None,) * (11 + num_params)
 
         # --- Prepare for backward integration ---
-        if quad_method == 'gk':
-            quad_integrator = AdaptiveGaussKronrod()
-        elif quad_method == 'simpson':
-            quad_integrator = FixedSimpson(**quad_options)
+        if quad_method == 'gl': # Gauss-Legendre
+            quad_integrator = GaussLegendreQuadrature(**quad_options)
         else:
-            raise ValueError(f"Unknown quadrature method: {quad_method}")
+            raise ValueError(f"Unknown or unsupported quadrature method: {quad_method}")
 
         T, dim = grad_y_traj.shape[-2], grad_y_traj.shape[-1]
         adj_y = grad_y_traj[..., -1, :].clone()
         adj_params = {k: torch.zeros_like(v) for k, v in params_req.items()}
-        full_p_dict_for_solve = {**params_req, **buffers_dict}
-
-        # --- Define the backward dynamics function (Optimized) ---
-        def neg_trans_A_func(t_val: Union[float, Tensor], p_and_b_dict: Dict) -> Tensor:
-            sys_out = functional_system_func(t_val, p_and_b_dict)
-            A = sys_out if not is_nonhomogeneous else sys_out[0]
-            return -A.transpose(-1, -2)
+        
+        adjoint_system = _AdjointSystem(functional_system_func)
 
         # --- Main backward loop ---
         for i in range(T - 1, 0, -1):
             t_i, t_prev = float(t[i]), float(t[i - 1])
+            
+            # Solve the pure adjoint ODE backward in time
+            a_dense_segment = adaptive_ode_solve(
+                adj_y, (t_i, t_prev), adjoint_system, full_p_and_b_dict, 
+                method=method, order=order, rtol=rtol, atol=atol, dense_output=True, dense_output_method=ctx.dense_output_method
+            )
 
-            # Solve the adjoint ODE backward in time (d-dimensional)
-            with torch.no_grad():
-                a_dense_traj = adaptive_ode_solve(
-                    adj_y, (t_i, t_prev), neg_trans_A_func, full_p_dict_for_solve, 
-                    method=method, order=order, rtol=rtol, atol=atol, dense_output=True, dense_output_method=ctx.dense_output_method
-                )
-
-            # --- Define VJP target and cotangents for quadrature ---
-            def f_for_vjp(t_nodes, p_dict_req):
-                full_dict = {**p_dict_req, **buffers_dict}
-                y_eval_aug = y_dense_traj_aug(t_nodes)
-                if is_nonhomogeneous and method == 'magnus':
-                    y_eval = y_eval_aug[..., :-1]
-                else:
-                    y_eval = y_eval_aug
-                
-                sys_out = functional_system_func(t_nodes, full_dict)
-                if is_nonhomogeneous:
-                    A, g = sys_out
-                    return _apply_matrix(A, y_eval) + g
-                else:
-                    return _apply_matrix(sys_out, y_eval)
-
-            # Update adjoint state for next segment
-            adj_y = a_dense_traj(t_prev)
-            adj_y.add_(grad_y_traj[..., i-1, :])
-
+            # --- Quadrature step ---
             integral_val_dict = quad_integrator(
-                f_for_vjp, a_dense_traj, t_i, t_prev, atol, rtol, params_req, is_nonhomogeneous
+                functional_system_func, a_dense_segment, y_dense_traj, (t_i, t_prev), params_req, buffers_dict, atol, rtol
             )
             
             for k in adj_params:
-                adj_params[k].sub_(integral_val_dict[k])
+                adj_params[k].add_(integral_val_dict[k])
+
+            # Update adjoint state for next segment
+            adj_y = a_dense_segment(t_prev)
+            adj_y.add_(grad_y_traj[..., i-1, :])
 
         grad_y0 = adj_y
         if not ctx.y0_requires_grad:
@@ -584,7 +527,7 @@ def odeint_adjoint(
     system_func_or_module: Union[Callable, nn.Module], y0: Tensor, t: Union[Sequence[float], torch.Tensor],
     params: Tensor = None,
     method: str = 'magnus', order: int = 4, rtol: float = 1e-6, atol: float = 1e-8,
-    quad_method: str = 'gk', quad_options: dict = None, dense_output_method: str = 'collocation_precompute'
+    quad_method: str = 'gl', quad_options: dict = None, dense_output_method: str = 'collocation_precompute'
 ) -> Tensor:
     """
     Solve linear ODE system with memory-efficient adjoint gradient computation.
@@ -604,7 +547,7 @@ def odeint_adjoint(
         order: Magnus integrator order (2, 4, or 6).
         rtol: Relative tolerance for integration.
         atol: Absolute tolerance for integration.
-        quad_method: Quadrature method for adjoint integration ('gk' or 'simpson').
+        quad_method: Quadrature method for adjoint integration ('gl').
         quad_options: Options dictionary for quadrature method.
         dense_output_method: Method for dense output ('collocation_precompute', 'collocation_ondemand', 'naive').
         
