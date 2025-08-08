@@ -171,6 +171,34 @@ plt.show()
 
 ```
 
+## API Reference
+
+Both `odeint` and `odeint_adjoint` share a common set of arguments for controlling the ODE solver.
+
+### Common Arguments
+
+| Argument              | Type         | Default                        | Description                                                                                                                            |
+| --------------------- | ------------ | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `system_func_or_module` | `nn.Module` or `Callable` | **Required**                   | A module or function defining the linear system.                                                                                       |
+| `y0`                  | `Tensor`     | **Required**                   | Initial conditions of shape `(*batch_shape, dim)`.                                                                                     |
+| `t`                   | `Tensor`     | **Required**                   | Time points for the solution, shape `(N,)`.                                                                                            |
+| `params`              | `Tensor`     | `None`                         | Optional parameter tensor for functional systems.                                                                                      |
+| `method`              | `str`        | `'magnus'`                     | The integration method: `'magnus'` (Magnus expansion) or `'glrk'` (Gauss-Legendre Runge-Kutta).                                        |
+| `order`               | `int`        | `4`                            | The order of the integrator (`2`, `4`, or `6`). Higher orders offer more precision.                                                    |
+| `rtol`                | `float`      | `1e-6`                         | Relative tolerance for the adaptive step-size controller.                                                                              |
+| `atol`                | `float`      | `1e-8`                         | Absolute tolerance for the adaptive step-size controller.                                                                              |
+| `dense_output`        | `bool`       | `False`                        | If `True`, returns a `DenseOutput` object for continuous solution interpolation. (Only for `odeint`).                                  |
+| `dense_output_method` | `str`        | `'collocation_precompute'`     | Method for dense output: `'naive'`, `'collocation_precompute'`, or `'collocation_ondemand'`.                                           |
+
+### `odeint_adjoint` Specific Arguments
+
+These arguments are used to control the backward pass in the adjoint method.
+
+| Argument       | Type   | Default | Description                                                                                              |
+| -------------- | ------ | ------- | -------------------------------------------------------------------------------------------------------- |
+| `quad_method`  | `str`  | `'gk'`  | The quadrature method for adjoint integration: `'gk'` (Gauss-Kronrod) or `'simpson'` (Simpson's rule). |
+| `quad_options` | `dict` | `None`  | Optional dictionary of settings for the chosen `quad_method`.                                            |
+
 ## Running Tests
 
 ```bash
