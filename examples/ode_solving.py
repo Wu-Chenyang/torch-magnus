@@ -28,7 +28,7 @@ def main():
     # We use odeint, which is imported from our new package.
     # Since A_func has no trainable parameters, we pass `params=None`.
     solution_trajectory = odeint(
-        A_func_or_module=A_func,
+        system_func_or_module=A_func,
         y0=y0,
         t=t_span,
         params=None, # No trainable parameters in this example
