@@ -3,6 +3,7 @@ from typing import Callable, Union, List
 from .stepper import Magnus2nd, Magnus4th, Magnus6th, Collocation
 from .butcher import GL2, GL4, GL6
 Tensor = torch.Tensor
+import scipy
 
 # -----------------------------------------------------------------------------
 # Dense Output (Continuous Extension)
@@ -72,9 +73,10 @@ class DenseOutputNaive:
         return y_interp
 
 class CollocationDenseOutput:
-    def __init__(self, ts: Tensor, ys: Union[None, Tensor] = None, t_nodes_traj: Union[None, Tensor] = None, A_nodes_traj: Union[None, Tensor] = None, g_nodes_traj: Union[None, Tensor] = None, order: int = None, dense_mode: str = 'precompute', precomputed_P: Union[None, Tensor] = None):
+    def __init__(self, ts: Tensor, ys: Union[None, Tensor] = None, t_nodes_traj: Union[None, Tensor] = None, A_nodes_traj: Union[None, Tensor] = None, g_nodes_traj: Union[None, Tensor] = None, order: int = None, dense_mode: str = 'precompute', precomputed_P: Union[None, Tensor] = None, interpolation_method: str = 'lifting'):
         self.order = order
         self.dense_mode = dense_mode
+        self.interpolation_method = interpolation_method
         self.ys = ys # [*batch_shape, n_intervals+1, dim]
         self.ts = ts # [n_intervals+1]
 
@@ -107,10 +109,19 @@ class CollocationDenseOutput:
             y1 = self.ys[..., 1:, :]
             h = self.hs
 
-            self.P = _solve_collocation_system(
-                y0, y1, h, t_nodes_traj-t0, A_nodes_traj, g_nodes_traj, n_stages, dim, 
-                ode_batch_shape, t_batch_shape
-            )
+            if self.interpolation_method == 'power':
+                self.P = _solve_collocation_system(
+                    y0, y1, h, t_nodes_traj-t0, A_nodes_traj, g_nodes_traj, n_stages, dim, 
+                    ode_batch_shape, t_batch_shape
+                )
+            elif self.interpolation_method == 'lifting':
+                self.P = _solve_collocation_system_lifting(
+                    y0, y1, h, t_nodes_traj-t0, A_nodes_traj, g_nodes_traj, n_stages, dim, 
+                    ode_batch_shape, t_batch_shape
+                )
+            else:
+                raise ValueError(f"Unknown interpolation_method: {self.interpolation_method}")
+
             self.t_nodes_traj = None
             self.A_nodes_traj = None
             self.g_nodes_traj = None
@@ -147,10 +158,19 @@ class CollocationDenseOutput:
                 A_nodes = self.A_nodes_traj[..., not_avail_indices, :, :]
                 g_nodes = self.g_nodes_traj[..., not_avail_indices, :] if self.g_nodes_traj is not None else None
 
-                coeffs = _solve_collocation_system(
-                    y0, y1, h, t_nodes, A_nodes, g_nodes, n_stages, dim, 
-                    ode_batch_shape, not_avail_indices.shape
-                )
+                if self.interpolation_method == 'power':
+                    coeffs = _solve_collocation_system(
+                        y0, y1, h, t_nodes, A_nodes, g_nodes, n_stages, dim, 
+                        ode_batch_shape, not_avail_indices.shape
+                    )
+                elif self.interpolation_method == 'lifting':
+                    coeffs = _solve_collocation_system_lifting(
+                        y0, y1, h, t_nodes, A_nodes, g_nodes, n_stages, dim, 
+                        ode_batch_shape, not_avail_indices.shape
+                    )
+                else:
+                    raise ValueError(f"Unknown interpolation_method: {self.interpolation_method}")
+
                 self.P[..., not_avail_indices, :, :] = coeffs
                 self.P_available[not_avail_indices] = True
             
@@ -167,6 +187,150 @@ class CollocationDenseOutput:
             y_interp += C[..., j, :] * torch.pow(t_eval.unsqueeze(-1), j)
             
         return y_interp
+
+def _eval_legendre_poly_and_deriv(max_order, x):
+    # x shape: [*x_shape]
+    # returns P, P_deriv, with shape [max_order+1, *x_shape]
+    x = torch.as_tensor(x)
+    device = x.device
+    dtype = x.dtype
+    P = torch.zeros((max_order + 1,) + x.shape, dtype=dtype, device=device)
+    P_deriv = torch.zeros((max_order + 1,) + x.shape, dtype=dtype, device=device)
+
+    P[0] = torch.ones_like(x)
+    if max_order > 0:
+        P[1] = x
+        P_deriv[1] = torch.ones_like(x)
+
+    for n in range(1, max_order):
+        P[n+1] = ((2*n+1) * x * P[n] - n * P[n-1]) / (n+1)
+        P_deriv[n+1] = P_deriv[n-1] + (2*n+1) * P[n]
+        
+    return P, P_deriv
+
+def _get_legendre_coeffs(max_order, dtype, device):
+    coeffs = torch.zeros(max_order + 1, max_order + 1, dtype=dtype, device=device)
+    if max_order >= 0:
+        coeffs[0, 0] = 1.0
+    if max_order >= 1:
+        coeffs[1, 1] = 1.0
+    for k in range(1, max_order):
+        coeffs[k+1, 1:] = (2*k+1)/(k+1) * coeffs[k, :-1]
+        coeffs[k+1, :] -= k/(k+1) * coeffs[k-1, :]
+    return coeffs
+
+def _solve_collocation_system_lifting(y0, y1, h, t_nodes, A_nodes, g_nodes, n_stages, dim, ode_batch_shape, t_batch_shape):
+    # --- Argument Shapes ---
+    # y0, y1: [*ode_batch_shape, *t_batch_shape, dim]
+    # h: [*t_batch_shape]
+    # t_nodes: [n_stages, *t_batch_shape]
+    # A_nodes: [*ode_batch_shape, n_stages, *t_batch_shape, dim, dim]
+    # g_nodes: [*ode_batch_shape, n_stages, *t_batch_shape, dim] or None
+    
+    batch_shape = ode_batch_shape + t_batch_shape
+
+    # --- 1. Construct y_0(t) and its derivative y_0'(t) ---
+    # Formula: y_0(t) = y0 + (y1 - y0) * t/h
+    # Formula: y_0'(t) = (y1 - y0) / h
+    h_ = h.unsqueeze(-1)
+    y0_prime = (y1 - y0) / h_
+    # Shape: y0_prime: [*ode_batch_shape, *t_batch_shape, dim]
+
+    # --- 2. Evaluate Basis Functions phi_j(t_i) and their derivatives phi_j'(t_i) ---
+    # Formula: phi_j(t) = t(t-h) * P_{j-1}(tau(t)), where tau(t) = 2t/h - 1
+    # Formula: phi_j'(t) = (2t-h)P_{j-1}(tau(t)) + t(t-h) * P'_{j-1}(tau(t)) * 2/h
+    
+    # Map t_nodes from [0, h] to [-1, 1] for Legendre polynomial evaluation
+    tau = 2 * t_nodes / h - 1
+    # Shape: tau: [n_stages, *t_batch_shape]
+    
+    # Evaluate Legendre polynomials and their derivatives up to order n_stages-1
+    legendre_polys, legendre_derivs = _eval_legendre_poly_and_deriv(n_stages - 1, tau)
+    # Shape: legendre_polys, legendre_derivs: [n_stages, n_stages, *t_batch_shape]
+    
+    # Calculate phi_j(t_i) and phi_j'(t_i)
+    # t_nodes has shape [n_stages, *t_batch_shape]
+    phi = t_nodes * (t_nodes - h) * legendre_polys
+    phi_deriv = (2*t_nodes - h) * legendre_polys + t_nodes * (t_nodes - h) * legendre_derivs * (2 / h)
+    
+    # Permute to align dimensions for building the matrix M
+    # Final shape: [*t_batch_shape, n_stages(i), n_stages(j)]
+    phi = phi.permute(*range(2, tau.dim()+1), 1, 0)
+    phi_deriv = phi_deriv.permute(*range(2, tau.dim()+1), 1, 0)
+
+    # --- 3. Construct and Solve the Linear System M*c = D ---
+    # Formula: M_ij = [phi_j'(t_i)I - phi_j(t_i)A(t_i)]
+    # Formula: D_i = A(t_i)y_0(t_i) + g(t_i) - y_0'(t_i)
+    
+    eye = torch.eye(dim, dtype=y0.dtype, device=y0.device)
+    # A_nodes needs to be permuted to match batch dimensions
+    # Original A_nodes: [*ode, n_stages, *t_batch, d, d] -> [*ode, *t_batch, n_stages, d, d]
+    permute_dims = list(range(len(ode_batch_shape))) + [len(ode_batch_shape) + i + 1 for i in range(len(t_batch_shape))] + [len(ode_batch_shape)] + list(range(A_nodes.dim()-2, A_nodes.dim()))
+    A_nodes_T = A_nodes.permute(*permute_dims)
+    
+    # Construct M: [*batch, n_stages(i), n_stages(j), dim, dim]
+    M = phi_deriv.unsqueeze(-1).unsqueeze(-1) * eye - phi.unsqueeze(-1).unsqueeze(-1) * A_nodes_T.unsqueeze(2)
+    M = M.transpose(-2,-3).reshape(*batch_shape, n_stages*dim, n_stages*dim)
+
+    # Construct D
+    # y0_at_nodes: [*ode, *t_batch, n_stages, dim]
+    y0_at_nodes = y0.unsqueeze(-2) + (y1-y0).unsqueeze(-2) * (t_nodes/h).permute(*range(1,t_nodes.dim()),0).unsqueeze(-1)
+    # D: [*ode, *t_batch, n_stages, dim]
+    D = torch.einsum('...isde,...ise->...isd', A_nodes_T, y0_at_nodes) - y0_prime.unsqueeze(-2)
+    if g_nodes is not None:
+        # g_nodes needs to be permuted
+        g_nodes_T = g_nodes.permute(*permute_dims[:-2], g_nodes.dim()-1)
+        D += g_nodes_T
+    
+    D = D.reshape(*batch_shape, n_stages*dim)
+    
+    # Solve for coefficients c_j
+    c_flat = torch.linalg.solve(M, D)
+    c = c_flat.reshape(*batch_shape, n_stages, dim)
+    # Shape c: [*batch_shape, n_stages, dim]
+
+    # --- 4. Convert Coefficients from Lifting Basis to Power Basis ---
+    # Final polynomial: y(t) = y_0(t) + sum_{j=0}^{n_stages-1} c_j * phi_j(t)
+    # We need to find coefficients P_k such that y(t) = sum_{k=0}^{n_stages+1} P_k * t^k
+    
+    poly_degree = n_stages + 1
+    n_coeffs = poly_degree + 1
+    final_coeffs = torch.zeros(*batch_shape, n_coeffs, dim, dtype=y0.dtype, device=y0.device)
+
+    # Add coefficients from y_0(t) = y0 + (y1-y0)/h * t
+    final_coeffs[..., 0, :] = y0
+    final_coeffs[..., 1, :] = (y1 - y0) / h_
+
+    # Get power series coefficients for Legendre polynomials P_j(x)
+    legendre_coeffs = _get_legendre_coeffs(n_stages-1, y0.dtype, y0.device)
+    
+    for j in range(n_stages): # For each c_j
+        # Get power series coeffs for P_{j}(tau(t)) where tau(t) = a*t + b
+        p_j_coeffs = legendre_coeffs[j] # Coeffs for P_j(x)
+        
+        # Compute power series for P_j(a*t+b) using binomial expansion
+        q_coeffs = torch.zeros(*t_batch_shape, j+1, dtype=y0.dtype, device=y0.device)
+        a = 2/h
+        b = -1.0
+        for m in range(j+1): # For each x^m term in P_j(x)
+            if p_j_coeffs[m] == 0: continue
+            for l in range(m+1): # Binomial expansion of (a*t+b)^m
+                comb = scipy.special.comb(m, l)
+                term = comb * (a**l) * (b**(m-l))
+                # print("************************************")
+                # print(term.shape, q_coeffs.shape, p_j_coeffs.shape)
+                # print("************************************")
+                q_coeffs[..., l] += p_j_coeffs[m] * term
+        
+        # Get power series for phi_j(t) = (t^2 - h*t) * P_j(tau(t))
+        phi_j_coeffs = torch.zeros(*t_batch_shape, j+3, dtype=y0.dtype, device=y0.device)
+        phi_j_coeffs[..., 2:j+3] += q_coeffs # from t^2 * P_j
+        phi_j_coeffs[..., 1:j+2] -= h.unsqueeze(-1) * q_coeffs # from -h*t * P_j
+        
+        # Add contribution of c_j * phi_j(t) to the final power series coefficients
+        final_coeffs[..., :j+3, :] += c[..., j, :].unsqueeze(-2) * phi_j_coeffs.unsqueeze(-1)
+
+    return final_coeffs
         
 def _solve_collocation_system(y0, y1, h, t_nodes, A_nodes, g_nodes, n_stages, dim, ode_batch_shape, t_batch_shape):
     """
@@ -274,7 +438,8 @@ def _merge_collocation_dense_outputs(dense_outputs: List['CollocationDenseOutput
         return CollocationDenseOutput(
             ts=merged_t_grid,
             dense_mode="precompute",
-            precomputed_P=merged_P_tensor
+            precomputed_P=merged_P_tensor,
+            interpolation_method=first_output.interpolation_method
         )
 
     
@@ -328,5 +493,6 @@ def _merge_collocation_dense_outputs(dense_outputs: List['CollocationDenseOutput
         A_nodes_traj=merged_A_nodes_traj,
         g_nodes_traj=merged_g_nodes_traj,
         order=first_output.order,
-        dense_mode=dense_mode
+        dense_mode=dense_mode,
+        interpolation_method=first_output.interpolation_method
     )
