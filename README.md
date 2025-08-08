@@ -41,34 +41,34 @@ You can define your linear system in two ways:
 
 This is the most flexible and standard method. The solver automatically detects if the system is homogeneous or non-homogeneous.
 
-- **For Homogeneous Systems (`dy/dt = Ay`)**: Implement the `forward(self, t)` method to return your matrix `A(t)`.
-- **For Non-Homogeneous Systems (`dy/dt = Ay + g`)**: Implement `forward(self, t)` for `A(t)` and add a `g(self, t)` method for the forcing term `g(t)`.
+- **For Homogeneous Systems (`dy/dt = Ay`)**: The `forward(self, t)` method should return your matrix `A(t)`. **`A(t)` must have shape `(*batch_shape, *t_shape, dim, dim)`. All systems must strictly adhere to this shape requirement.**
+- **For Non-Homogeneous Systems (`dy/dt = Ay + g`)**: The `forward(self, t)` method should return a tuple `(A(t), g(t))`.
+    **Crucially, `A(t)` must have shape `(*batch_shape, *t_shape, dim, dim)` and `g(t)` must have shape `(*batch_shape, *t_shape, dim)`. All systems must strictly adhere to these shape requirements.**
 
 ```python
+import torch
 import torch.nn as nn
 
 class MyNonHomogeneousSystem(nn.Module):
     def __init__(self, A):
         super().__init__()
-        self.A = A # Shape: (*batch_A, dim, dim)
+        # A has shape (*batch_shape, dim, dim)
+        self.A = A
 
     def forward(self, t):
-        # Must return A(t) with shape (*batch_A, *t.shape, dim, dim)
-        t_shape = t.shape
-        A_view = self.A.view(
-            *self.A.shape[:1],
-            *((1,) * len(t_shape)),
-            *self.A.shape[1:]
-        )
-        return A_view.expand(
-            *self.A.shape[:1],
-            *t_shape,
-            *self.A.shape[1:]
-        )
+        # t has shape (*t_shape)
+        # We must return A_t and g_t with broadcast-compatible shapes.
+        # A_t should be (*batch_shape, *t_shape, dim, dim)
+        # g_t should be (*batch_shape, *t_shape, dim)
 
-    def g(self, t):
-        # Must return g(t) with shape (*batch_g, *t.shape, dim)
-        return torch.sin(t).unsqueeze(-1).expand(*t.shape, 2)
+        A_view = self.A.view(*self.A.shape[:-2], *((1,) * t.ndim), *self.A.shape[-2:])
+        A_t = A_view.expand(*self.A.shape[:-2], *t.shape, *self.A.shape[-2:])
+
+        # Create a g(t) that is broadcast-compatible with A_t
+        g_t_no_batch = torch.sin(t).unsqueeze(-1).expand(*t.shape, self.A.shape[-1])
+        g_t = g_t_no_batch.expand(*self.A.shape[:-2], *t.shape, self.A.shape[-1])
+        
+        return A_t, g_t
 ```
 
 #### Approach 2: Using a Plain Function
@@ -79,15 +79,18 @@ For simple systems without internal state, you can use a plain function with the
 # A is passed via the `params` argument
 def functional_system(t, params):
     A = params
-    t_shape = t.shape
-    A_view = A.view(*((1,) * len(t_shape)), *A.shape)
-    return A_view.expand(*t_shape, *A.shape)
+    # A can have shape (*batch_shape, dim, dim)
+    # t has shape (*t_shape)
+    # We must return A_t with broadcast-compatible shapes.
+    # A_t should be (*batch_shape, *t_shape, dim, dim)
+    A_view = A.view(*A.shape[:-2], *((1,) * t.ndim), *A.shape[-2:])
+    return A_view.expand(*A.shape[:-2], *t.shape, *A.shape[-2:])
 ```
 
 ### Key API Rules (Common Pitfalls)
 
 - **Strict `forward(self, t)` Signature**: The `forward` method of your `nn.Module` **must** accept only `t` (time) as an argument. The solver handles the `y` variable internally.
-- **Shape Expansion is Critical**: Your returned `A(t)` and `g(t)` tensors must be explicitly expanded to match the shape of the input time tensor `t`.
+- **Shape Expansion is Critical**: Your returned `A(t)` and `g(t)` tensors must be explicitly expanded to match the shape of the input time tensor `t`. Note that `t` can have shape `()` (scalar) or `(N,)` (1D tensor), and `batch_shape` can be arbitrary.
 - **Automatic Broadcasting**: The solver automatically broadcasts the batch dimensions of your system (`A(t)`, `g(t)`) and your initial conditions (`y0`). Ensure your batch dimensions are compatible.
 
 ## Complete Example: Learning an Unknown System
@@ -108,9 +111,12 @@ class LearnableLinearODE(nn.Module):
         self.A = nn.Parameter(torch.randn(dim, dim))
 
     def forward(self, t):
-        t_shape = t.shape
-        A_view = self.A.view(*((1,) * len(t_shape)), *self.A.shape)
-        return A_view.expand(*t_shape, *self.A.shape)
+        # A has shape (*batch_shape, dim, dim)
+        # t has shape (*t_shape)
+        # We must return A_t with broadcast-compatible shapes.
+        # A_t should be (*batch_shape, *t_shape, dim, dim)
+        A_view = self.A.view(*self.A.shape[:-2], *((1,) * t.ndim), *self.A.shape[-2:])
+        return A_view.expand(*self.A.shape[:-2], *t.shape, *self.A.shape[-2:])
 
 class GroundTruthODE(nn.Module):
     def __init__(self, A_true):
@@ -118,9 +124,12 @@ class GroundTruthODE(nn.Module):
         self.A = A_true
 
     def forward(self, t):
-        t_shape = t.shape
-        A_view = self.A.view(*((1,) * len(t_shape)), *self.A.shape)
-        return A_view.expand(*t_shape, *self.A.shape)
+        # A has shape (*batch_shape, dim, dim)
+        # t has shape (*t_shape)
+        # We must return A_t with broadcast-compatible shapes.
+        # A_t should be (*batch_shape, *t_shape, dim, dim)
+        A_view = self.A.view(*self.A.shape[:-2], *((1,) * t.ndim), *self.A.shape[-2:])
+        return A_view.expand(*self.A.shape[:-2], *t.shape, *self.A.shape[-2:])
 
 # 2. Generate ground truth data from the true system
 print("--- Generating ground truth data ---")
@@ -129,7 +138,6 @@ y0 = torch.tensor([2.0, 0.0])
 t_span = torch.linspace(0, 10, 100)
 true_system = GroundTruthODE(A_true)
 with torch.no_grad():
-    # Use standard odeint for inference
     y_true = odeint(true_system, y0, t_span)
 
 # 3. Set up and train the learnable model
@@ -137,13 +145,11 @@ print("--- Training the learnable model ---")
 model = LearnableLinearODE(dim=2)
 optimizer = optim.Adam(model.parameters(), lr=0.01)
 
-# Initialize parameters near the true solution to ensure convergence
 with torch.no_grad():
     model.A.data = A_true + torch.randn_like(A_true) * 0.3
 
 for epoch in range(1000):
     optimizer.zero_grad()
-    # Use odeint_adjoint for memory-efficient training
     y_pred = odeint_adjoint(model, y0, t_span)
     loss = nn.MSELoss()(y_pred, y_true)
     loss.backward()
@@ -169,6 +175,56 @@ plt.grid(True)
 plt.axis('equal')
 plt.show()
 
+```
+
+## Example: Solving a Non-Homogeneous System
+
+Here is an example of solving a non-homogeneous system representing a forced harmonic oscillator.
+
+```python
+import torch
+import torch.nn as nn
+import matplotlib.pyplot as plt
+from torch_linode.solvers import odeint
+
+# 1. Define the non-homogeneous system
+class ForcedOscillator(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.A = torch.tensor([[0., 1.], [-1., 0.]])
+
+    def forward(self, t):
+        # A has shape (*batch_shape, dim, dim)
+        # t has shape (*t_shape)
+        # We must return A_t and g_t with broadcast-compatible shapes.
+        # A_t should be (*batch_shape, *t_shape, dim, dim)
+        # g_t should be (*batch_shape, *t_shape, dim)
+        A_view = self.A.view(*self.A.shape[:-2], *((1,) * t.ndim), *self.A.shape[-2:])
+        A_t = A_view.expand(*self.A.shape[:-2], *t.shape, *self.A.shape[-2:])
+
+        g_t_no_batch = torch.stack([torch.sin(t), torch.cos(t)], dim=-1)
+        g_t = g_t_no_batch.expand(*self.A.shape[:-2], *t.shape, self.A.shape[-1])
+        return A_t, g_t
+
+# 2. Set up the problem
+system = ForcedOscillator()
+y0 = torch.tensor([1.0, 0.0])
+t_span = torch.linspace(0, 20, 200)
+
+# 3. Solve the ODE
+with torch.no_grad():
+    solution = odeint(system, y0, t_span)
+
+# 4. Plot the results
+plt.figure(figsize=(10, 5))
+plt.plot(t_span, solution[:, 0], label='y_1(t)')
+plt.plot(t_span, solution[:, 1], label='y_2(t)')
+plt.title("Solution of a Forced Oscillator")
+plt.xlabel("Time")
+plt.ylabel("State")
+plt.legend()
+plt.grid(True)
+plt.show()
 ```
 
 ## API Reference

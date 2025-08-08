@@ -8,7 +8,7 @@ import torch.optim as optim
 import matplotlib
 matplotlib.use('Agg') # Use a non-interactive backend for testing
 import matplotlib.pyplot as plt
-from torch_linode.solvers import odeint
+from torch_linode.solvers import odeint, odeint_adjoint
 
 # --- Test for the Homogeneous System Example ---
 def test_homogeneous_example():
@@ -19,57 +19,28 @@ def test_homogeneous_example():
             self.A = A
 
         def forward(self, t):
-            t_shape = t.shape
-            A_view = self.A.view(*self.A.shape[:1], *((1,) * len(t_shape)), *self.A.shape[1:])
-            return A_view.expand(*self.A.shape[:1], *t_shape, *self.A.shape[1:])
+            A_view = self.A.view(*self.A.shape[:-2], *((1,) * t.ndim), *self.A.shape[-2:])
+            return A_view.expand(*self.A.shape[:-2], *t.shape, *self.A.shape[-2:])
 
     A = torch.tensor([[[0., -1.], [1., 0.]]]) # Batch of 1
     y0 = torch.tensor([[1., 0.]])
     t_span = torch.linspace(0, 1, 10)
     system = MyHomogeneousSystem(A)
     
-    # Ensure it runs without errors
-    solution = odeint(system, y0, t_span)
-    assert solution.shape == (1, 10, 2)
-
-# --- Test for the Non-Homogeneous System Example ---
-def test_non_homogeneous_example():
-    """Tests the MyNonHomogeneousSystem example from the README."""
-    class MyNonHomogeneousSystem(nn.Module):
-        def __init__(self, A):
-            super().__init__()
-            self.A = A
-
-        def forward(self, t):
-            t_shape = t.shape
-            A_view = self.A.view(*self.A.shape[:1], *((1,) * len(t_shape)), *self.A.shape[1:])
-            return A_view.expand(*self.A.shape[:1], *t_shape, *self.A.shape[1:])
-
-        def g(self, t):
-            return torch.sin(t).unsqueeze(-1).expand(*t.shape, 2)
-
-    A = torch.tensor([[[0., -1.], [1., 0.]]]) # Batch of 1
-    y0 = torch.tensor([[1., 0.]])
-    t_span = torch.linspace(0, 1, 10)
-    system = MyNonHomogeneousSystem(A)
-    
-    # Ensure it runs without errors
     solution = odeint(system, y0, t_span)
     assert solution.shape == (1, 10, 2)
 
 # --- Test for the Full Learning Example ---
 def test_learning_example():
     """Tests the full "Learning an Unknown System" example from the README."""
-    # 1. Define the modules
     class LearnableLinearODE(nn.Module):
         def __init__(self, dim=2):
             super().__init__()
             self.A = nn.Parameter(torch.randn(dim, dim))
 
         def forward(self, t):
-            t_shape = t.shape
-            A_view = self.A.view(*((1,) * len(t_shape)), *self.A.shape)
-            return A_view.expand(*t_shape, *self.A.shape)
+            A_view = self.A.view(*self.A.shape[:-2], *((1,) * t.ndim), *self.A.shape[-2:])
+            return A_view.expand(*self.A.shape[:-2], *t.shape, *self.A.shape[-2:])
 
     class GroundTruthODE(nn.Module):
         def __init__(self, A_true):
@@ -77,11 +48,9 @@ def test_learning_example():
             self.A = A_true
 
         def forward(self, t):
-            t_shape = t.shape
-            A_view = self.A.view(*((1,) * len(t_shape)), *self.A.shape)
-            return A_view.expand(*t_shape, *self.A.shape)
+            A_view = self.A.view(*self.A.shape[:-2], *((1,) * t.ndim), *self.A.shape[-2:])
+            return A_view.expand(*self.A.shape[:-2], *t.shape, *self.A.shape[-2:])
 
-    # 2. Generate ground truth data
     A_true = torch.tensor([[-0.1, -1.0], [1.0, -0.1]])
     y0 = torch.tensor([2.0, 0.0])
     t_span = torch.linspace(0, 10, 100)
@@ -89,7 +58,6 @@ def test_learning_example():
     with torch.no_grad():
         y_true = odeint(true_system, y0, t_span)
 
-    # 3. Set up and train the model
     model = LearnableLinearODE(dim=2)
     optimizer = optim.Adam(model.parameters(), lr=0.01)
     loss_fn = nn.MSELoss()
@@ -97,21 +65,18 @@ def test_learning_example():
     with torch.no_grad():
         model.A.data = A_true + torch.randn_like(A_true) * 0.3
 
-    initial_loss = loss_fn(odeint(model, y0, t_span), y_true)
+    initial_loss = loss_fn(odeint_adjoint(model, y0, t_span), y_true)
 
-    for _ in range(10): # A few steps are enough to see loss decrease
+    for _ in range(10):
         optimizer.zero_grad()
-        y_pred = odeint(model, y0, t_span)
+        y_pred = odeint_adjoint(model, y0, t_span)
         loss = loss_fn(y_pred, y_true)
         loss.backward()
         optimizer.step()
     
-    final_loss = loss_fn(odeint(model, y0, t_span), y_true)
-
-    # Assert that the loss has decreased, proving learning is happening
+    final_loss = loss_fn(odeint_adjoint(model, y0, t_span), y_true)
     assert final_loss < initial_loss
 
-    # 4. Test that the visualization code runs without error
     try:
         with torch.no_grad():
             y_pred_final = odeint(model, y0, t_span)
@@ -124,25 +89,22 @@ def test_learning_example():
         plt.legend()
         plt.grid(True)
         plt.axis('equal')
-        # plt.show() # Do not show plot in tests
-        plt.close() # Close the figure to free memory
+        plt.close()
     except Exception as e:
         assert False, f"Visualization code failed with error: {e}"
-
 
 # --- Test for the Functional API with odeint_adjoint Example ---
 def test_functional_adjoint_example():
     """Tests the functional API example with odeint_adjoint from the README."""
-    from torch_linode.solvers import odeint_adjoint
-
-    # 1. Define the system as a function
     def functional_system(t, params):
         A = params
-        t_shape = t.shape
-        A_view = A.view(*((1,) * len(t_shape)), *A.shape)
-        return A_view.expand(*t_shape, *A.shape)
+        # A can have shape (*batch_shape, dim, dim)
+        # t has shape (*t_shape)
+        # We must return A_t with broadcast-compatible shapes.
+        # A_t should be (*batch_shape, *t_shape, dim, dim)
+        A_view = A.view(*A.shape[:-2], *((1,) * t.ndim), *A.shape[-2:])
+        return A_view.expand(*A.shape[:-2], *t.shape, *A.shape[-2:])
 
-    # 2. Set up the learning problem
     A_true = torch.tensor([[-0.1, -1.0], [1.0, -0.1]])
     y0 = torch.tensor([2.0, 0.0])
     t_span = torch.linspace(0, 10, 100)
@@ -150,7 +112,6 @@ def test_functional_adjoint_example():
     with torch.no_grad():
         y_true = odeint_adjoint(functional_system, y0, t_span, params=A_true)
 
-    # 3. Initialize learnable parameters and optimizer
     A_learnable = torch.randn(2, 2, requires_grad=True)
     with torch.no_grad():
         A_learnable.data = A_true + torch.randn_like(A_true) * 0.01
@@ -159,7 +120,6 @@ def test_functional_adjoint_example():
 
     initial_loss = loss_fn(odeint_adjoint(functional_system, y0, t_span, params=A_learnable), y_true)
 
-    # 4. Training loop
     for _ in range(10):
         optimizer.zero_grad()
         y_pred = odeint_adjoint(functional_system, y0, t_span, params=A_learnable)
@@ -168,5 +128,40 @@ def test_functional_adjoint_example():
         optimizer.step()
 
     final_loss = loss_fn(odeint_adjoint(functional_system, y0, t_span, params=A_learnable), y_true)
-
     assert final_loss < initial_loss
+
+# --- Test for the Non-Homogeneous Example ---
+def test_readme_non_homogeneous_example():
+    """Tests the "Solving a Non-Homogeneous System" example from the README."""
+    class ForcedOscillator(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.A = torch.tensor([[0., 1.], [-1., 0.]])
+
+        def forward(self, t):
+            A_view = self.A.view(*self.A.shape[:-2], *((1,) * t.ndim), *self.A.shape[-2:])
+            A_t = A_view.expand(*self.A.shape[:-2], *t.shape, *self.A.shape[-2:])
+            g_t = torch.stack([torch.sin(t), torch.cos(t)], dim=-1).expand(*self.A.shape[:-2], *t.shape, self.A.shape[-1])
+            return A_t, g_t
+
+    system = ForcedOscillator()
+    y0 = torch.tensor([1.0, 0.0])
+    t_span = torch.linspace(0, 20, 200)
+
+    with torch.no_grad():
+        solution = odeint(system, y0, t_span)
+
+    assert solution.shape == (200, 2)
+
+    try:
+        plt.figure(figsize=(10, 5))
+        plt.plot(t_span, solution[:, 0], label='y_1(t)')
+        plt.plot(t_span, solution[:, 1], label='y_2(t)')
+        plt.title("Solution of a Forced Oscillator")
+        plt.xlabel("Time")
+        plt.ylabel("State")
+        plt.legend()
+        plt.grid(True)
+        plt.close()
+    except Exception as e:
+        assert False, f"Visualization code failed with error: {e}"

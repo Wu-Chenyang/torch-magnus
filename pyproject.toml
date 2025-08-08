@@ -20,7 +20,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Mathematics",
 ]
 dependencies = [
-    "torch>=1.13",
+    "torch>=1.10",
+    "numpy",
+    "scipy"
 ]
 
 [project.optional-dependencies]
