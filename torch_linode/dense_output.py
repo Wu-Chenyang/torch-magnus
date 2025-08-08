@@ -179,12 +179,10 @@ class CollocationDenseOutput:
 
         # Evaluate the polynomial with the computed coefficients
         # t_eval should be broadcastable to batch_shape
-        t_eval = (t_batch - t0).view((1,) * len(ode_batch_shape) + t_batch_shape)
-
-        # y_interp should have shape (*batch_shape, dim)
-        y_interp = torch.zeros(ode_batch_shape + t_batch_shape + (dim,), dtype=self.ts.dtype, device=self.ts.device)
-        for j in range(n_coeffs):
-            y_interp += C[..., j, :] * torch.pow(t_eval.unsqueeze(-1), j)
+        t_eval = t_batch - t0
+        powers = torch.arange(n_coeffs, device=t_eval.device, dtype=t_eval.dtype)
+        t_powers = torch.pow(t_eval.unsqueeze(-1), powers).unsqueeze(-1)  # [..., time, n_coeffs, 1]
+        y_interp = torch.sum(C * t_powers, dim=-2)  # [..., time, dim]
             
         return y_interp
 
