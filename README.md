@@ -1,22 +1,22 @@
-# torch-linode
+# torch-linode: A PyTorch Solver for Linear ODEs
 
 [![PyPI version](https://badge.fury.io/py/torch-linode.svg)](https://badge.fury.io/py/torch-linode)
 [![Tests](https://github.com/Wu-Chenyang/torch-linode/actions/workflows/ci.yml/badge.svg)](https://github.com/Wu-Chenyang/torch-linode/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-`torch-linode` is a specialized PyTorch-based library for the efficient **batch solving of homogeneous and non-homogeneous linear ordinary differential equations (ODEs)**. It solves systems of the form:
+`torch-linode` is a specialized PyTorch library for the efficient and differentiable batch solving of **linear ordinary differential equations (ODEs)**. It is designed to solve systems of the form:
+
 - **Homogeneous**: `dy/dt = A(t)y(t)`
 - **Non-homogeneous**: `dy/dt = A(t)y(t) + g(t)`
 
-It leverages Magnus-type integrators to provide high-precision, differentiable, and GPU-accelerated solutions. This library is particularly well-suited for problems in quantum mechanics, control theory, and other areas of physics and engineering where such ODEs are common.
+Leveraging high-order integrators and a memory-efficient adjoint method for backpropagation, this library is particularly well-suited for problems in physics, control theory, and for implementing "Neural ODE" models with linear dynamics.
 
 ## Key Features
 
-- **Solves Homogeneous & Non-homogeneous Systems**: Unified API for both types of linear ODEs.
-- **Batch Processing**: Natively handles batches of initial conditions and parameters for massive parallelization.
-- **High-Order Integrators**: Includes 2nd, 4th, and 6th-order Magnus integrators, and a generic `Collocation` solver supporting various Butcher tableaus (e.g., Gauss-Legendre, Radau IIA).
-- **Adaptive Stepping**: Automatically adjusts step size to meet specified error tolerances (`rtol`, `atol`).
-- **Differentiable**: Gradients can be backpropagated through the solvers using a memory-efficient adjoint method.
+- **Specialized for Linear ODEs**: Optimized for homogeneous and non-homogeneous linear systems.
+- **Powerful Batch Processing**: Natively handles broadcasting between batches of systems (`A(t)`, `g(t)`) and batches of initial conditions (`y0`).
+- **High-Order Integrators**: Includes 2nd, 4th, and 6th-order Magnus integrators and a generic `Collocation` solver (e.g., Gauss-Legendre).
+- **Fully Differentiable**: Gradients can be backpropagated through the solvers, making it ideal for training.
 - **Dense Output**: Provides continuous solutions for evaluation at any time point.
 - **GPU Support**: Runs seamlessly on CUDA-enabled devices.
 
@@ -26,100 +26,149 @@ It leverages Magnus-type integrators to provide high-precision, differentiable, 
 pip install torch-linode
 ```
 
-Or, for development, clone this repository and install in editable mode:
+## Core API
 
-```bash
-git clone https://github.com/Wu-Chenyang/torch-linode.git
-cd torch-linode
-pip install -e ".[dev]"
-```
+This library provides two main solver functions: `odeint` and `odeint_adjoint`.
 
-## API and Usage
+- **`odeint`**: The standard solver. Use this for simple forward passes (inference) where gradients are not required.
+- **`odeint_adjoint`**: A memory-efficient solver for training. It uses the adjoint sensitivity method to compute gradients, which uses significantly less memory than storing the entire computation graph. **Always prefer `odeint_adjoint` for training.**
 
-The primary functions are `odeint` and `odeint_adjoint`. The solver automatically detects whether the system is homogeneous or non-homogeneous based on the return value of the system function.
+### Defining The System: Two Approaches
+
+You can define your linear system in two ways:
+
+#### Approach 1: Using `nn.Module` (Recommended)
+
+This is the most flexible and standard method. The solver automatically detects if the system is homogeneous or non-homogeneous.
+
+- **For Homogeneous Systems (`dy/dt = Ay`)**: Implement the `forward(self, t)` method to return your matrix `A(t)`.
+- **For Non-Homogeneous Systems (`dy/dt = Ay + g`)**: Implement `forward(self, t)` for `A(t)` and add a `g(self, t)` method for the forcing term `g(t)`.
 
 ```python
-odeint(
-    system_func_or_module: Union[Callable, nn.Module], 
-    y0: Tensor, 
-    t: Union[Sequence[float], torch.Tensor],
-    params: Tensor = None,
-    # ... other options
-) -> Tensor
+import torch.nn as nn
+
+class MyNonHomogeneousSystem(nn.Module):
+    def __init__(self, A):
+        super().__init__()
+        self.A = A # Shape: (*batch_A, dim, dim)
+
+    def forward(self, t):
+        # Must return A(t) with shape (*batch_A, *t.shape, dim, dim)
+        t_shape = t.shape
+        A_view = self.A.view(
+            *self.A.shape[:1],
+            *((1,) * len(t_shape)),
+            *self.A.shape[1:]
+        )
+        return A_view.expand(
+            *self.A.shape[:1],
+            *t_shape,
+            *self.A.shape[1:]
+        )
+
+    def g(self, t):
+        # Must return g(t) with shape (*batch_g, *t.shape, dim)
+        return torch.sin(t).unsqueeze(-1).expand(*t.shape, 2)
 ```
 
-### Parameters
+#### Approach 2: Using a Plain Function
 
-- `system_func_or_module`: The function or `nn.Module` that defines the system.
-  - **For homogeneous systems (`dy/dt = Ay`)**: Return a single tensor `A(t)` of shape `(*batch_shape, dim, dim)`.
-  - **For non-homogeneous systems (`dy/dt = Ay + g`)**: Return a tuple `(A(t), g(t))`, where `g(t)` is a tensor of shape `(*batch_shape, dim)`.
-- `y0`: A tensor of initial conditions with shape `(*batch_shape, dim)`.
-- `t`: A 1D tensor or sequence of time points at which to evaluate the solution.
-- `params`: Optional tensor of parameters to be passed to the system function.
-- `method`: Integration method. Currently supports `'magnus'` (for Magnus integrators) and `'glrk'` (for Gauss-Legendre Runge-Kutta methods, which now use the generic `Collocation` solver).
-- `order`: Integrator order. For Magnus, supports 2, 4, or 6. For `glrk` method, this implicitly selects the corresponding Butcher tableau (e.g., `order=4` for `glrk` uses `GL4`).
-- `rtol`: Relative tolerance for adaptive stepping.
-- `atol`: Absolute tolerance for adaptive stepping.
-- `dense_output`: If `True`, returns a `DenseOutput` object for continuous interpolation.
-- `dense_output_method`: Method for dense output (`'naive'` or `'collocation'`).
+For simple systems without internal state, you can use a plain function with the signature `system_func(t, params)`.
 
-### Available Butcher Tableaus (for `method='glrk'`)
+```python
+# A is passed via the `params` argument
+def functional_system(t, params):
+    A = params
+    t_shape = t.shape
+    A_view = A.view(*((1,) * len(t_shape)), *A.shape)
+    return A_view.expand(*t_shape, *A.shape)
+```
 
-The `glrk` method now leverages a generic `Collocation` solver and can be configured with various Butcher tableaus. The `order` parameter implicitly selects the tableau:
-- `order=2`: Uses `GL2` (2-stage Gauss-Legendre, order 4)
-- `order=4`: Uses `GL4` (2-stage Gauss-Legendre, order 4)
-- `order=6`: Uses `GL6` (3-stage Gauss-Legendre, order 6)
+### Key API Rules (Common Pitfalls)
 
-Additionally, the following Radau IIA tableaus are available internally and can be used by directly instantiating `Collocation` with the desired tableau:
-- `RADAU2` (1-stage Radau IIA, order 1)
-- `RADAU4` (2-stage Radau IIA, order 3)
-- `RADAU6` (3-stage Radau IIA, order 5)
+- **Strict `forward(self, t)` Signature**: The `forward` method of your `nn.Module` **must** accept only `t` (time) as an argument. The solver handles the `y` variable internally.
+- **Shape Expansion is Critical**: Your returned `A(t)` and `g(t)` tensors must be explicitly expanded to match the shape of the input time tensor `t`.
+- **Automatic Broadcasting**: The solver automatically broadcasts the batch dimensions of your system (`A(t)`, `g(t)`) and your initial conditions (`y0`). Ensure your batch dimensions are compatible.
 
-### Returns
+## Complete Example: Learning an Unknown System
 
-A tensor of shape `(*batch_shape, N, dim)` containing the solution trajectories.
-
----
-
-`odeint_adjoint` has the same signature but uses a more memory-efficient method for computing gradients, making it ideal for training and optimization.
-
-## Example: Solving a Non-homogeneous ODE
-
-This example solves `dy/dt = A(t)y + g(t)` where `A` is a constant rotation matrix and `g` is a time-dependent vector.
+This example demonstrates the core power of `torch-linode`: learning the parameters of an unknown dynamical system from observed data using `odeint_adjoint`.
 
 ```python
 import torch
-from torch_linode import odeint
-import numpy as np
+import torch.nn as nn
+import torch.optim as optim
+import matplotlib.pyplot as plt
+from torch_linode.solvers import odeint, odeint_adjoint
 
-# 1. Define the non-homogeneous system
-dim = 2
-A = torch.tensor([[0., 1.], [-1., 0.]], dtype=torch.float64)
+# 1. Define the learnable system and a ground truth system
+class LearnableLinearODE(nn.Module):
+    def __init__(self, dim=2):
+        super().__init__()
+        self.A = nn.Parameter(torch.randn(dim, dim))
 
-def system_func(t, params):
-    # This function returns a tuple (A, g)
-    t_tensor = torch.as_tensor(t, dtype=torch.float64)
-    A_t = A.expand(*t_tensor.shape, dim, dim)
-    g_t = torch.stack([torch.sin(t_tensor), torch.cos(t_tensor)], dim=-1)
-    return A_t, g_t
+    def forward(self, t):
+        t_shape = t.shape
+        A_view = self.A.view(*((1,) * len(t_shape)), *self.A.shape)
+        return A_view.expand(*t_shape, *self.A.shape)
 
-# 2. Set initial conditions and time points
-y0 = torch.tensor([1.0, 0.0], dtype=torch.float64)
-t_span = torch.linspace(0, 2 * np.pi, 30, dtype=torch.float64)
+class GroundTruthODE(nn.Module):
+    def __init__(self, A_true):
+        super().__init__()
+        self.A = A_true
 
-# 3. Call the solver
-solution = odeint(
-    system_func_or_module=system_func,
-    y0=y0,
-    t=t_span,
-    method='glrk', # Specify the method
-    order=4 # Specify the order for GLRK (uses GL4 tableau)
-)
+    def forward(self, t):
+        t_shape = t.shape
+        A_view = self.A.view(*((1,) * len(t_shape)), *self.A.shape)
+        return A_view.expand(*t_shape, *self.A.shape)
 
-# 4. The exact solution is y(t) = [cos(t) + t*sin(t), -sin(t) + t*cos(t)]
-# The final point should be [1, 2*pi]
-print(f"Computed y(2pi): {solution[-1].numpy()}")
-# Expected: [1.         6.28318531]
+# 2. Generate ground truth data from the true system
+print("--- Generating ground truth data ---")
+A_true = torch.tensor([[-0.1, -1.0], [1.0, -0.1]]) # Damped spiral
+y0 = torch.tensor([2.0, 0.0])
+t_span = torch.linspace(0, 10, 100)
+true_system = GroundTruthODE(A_true)
+with torch.no_grad():
+    # Use standard odeint for inference
+    y_true = odeint(true_system, y0, t_span)
+
+# 3. Set up and train the learnable model
+print("--- Training the learnable model ---")
+model = LearnableLinearODE(dim=2)
+optimizer = optim.Adam(model.parameters(), lr=0.01)
+
+# Initialize parameters near the true solution to ensure convergence
+with torch.no_grad():
+    model.A.data = A_true + torch.randn_like(A_true) * 0.3
+
+for epoch in range(1000):
+    optimizer.zero_grad()
+    # Use odeint_adjoint for memory-efficient training
+    y_pred = odeint_adjoint(model, y0, t_span)
+    loss = nn.MSELoss()(y_pred, y_true)
+    loss.backward()
+    optimizer.step()
+    if (epoch + 1) % 100 == 0:
+        print(f"Epoch {epoch + 1}, Loss: {loss.item():.6f}")
+
+print(f"Learned Matrix A:\n{model.A.data}")
+print(f"True Matrix A:\n{A_true}")
+
+# 4. Visualize the results
+with torch.no_grad():
+    y_pred_final = odeint(model, y0, t_span)
+
+plt.figure(figsize=(8, 4))
+plt.plot(y_true[:, 0], y_true[:, 1], 'g-', label='Ground Truth', linewidth=2)
+plt.plot(y_pred_final[:, 0], y_pred_final[:, 1], 'b--', label='Learned Trajectory')
+plt.title("Phase Portrait: Learning an ODE System")
+plt.xlabel("State 1")
+plt.ylabel("State 2")
+plt.legend()
+plt.grid(True)
+plt.axis('equal')
+plt.show()
+
 ```
 
 ## Running Tests
@@ -128,10 +177,6 @@ print(f"Computed y(2pi): {solution[-1].numpy()}")
 pip install -e ".[dev]"
 pytest
 ```
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a pull request or open an issue.
 
 ## License
 
