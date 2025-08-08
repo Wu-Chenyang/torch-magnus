@@ -4,6 +4,8 @@ from .stepper import Magnus2nd, Magnus4th, Magnus6th, Collocation
 from .butcher import GL2, GL4, GL6
 Tensor = torch.Tensor
 import scipy
+import numpy as np
+from functools import lru_cache
 
 # -----------------------------------------------------------------------------
 # Dense Output (Continuous Extension)
@@ -186,28 +188,58 @@ class CollocationDenseOutput:
             
         return y_interp
 
+@lru_cache(maxsize=None)
+def _get_legendre_coeffs_and_deriv_coeffs(max_order, device, dtype):
+    """
+    Calculates and caches the power series coefficients for Legendre polynomials
+    and their derivatives.
+    """
+    # Get the cached power series coefficients for Legendre polynomials P_n(x)
+    poly_coeffs = _get_legendre_coeffs(max_order)
+
+    # Compute coefficients for the derivatives P'_n(x)
+    # If P_n(x) = sum_k c_k * x^k, then P'_n(x) = sum_k k * c_k * x^(k-1)
+    k = np.arange(max_order + 1)
+    deriv_coeffs_times_power = poly_coeffs * k
+    # The coefficient of x^j in P'_n(x) is (j+1)*c_{j+1}
+    deriv_coeffs = np.roll(deriv_coeffs_times_power, -1, axis=1)
+    deriv_coeffs[:, -1] = 0
+    
+    return torch.from_numpy(poly_coeffs).to(device=device, dtype=dtype), torch.from_numpy(deriv_coeffs).to(device=device, dtype=dtype)
+
 def _eval_legendre_poly_and_deriv(max_order, x):
-    # x shape: [*x_shape]
-    # returns P, P_deriv, with shape [max_order+1, *x_shape]
+    """
+    Evaluates Legendre polynomials and their derivatives up to a given order
+    at specified points x.
+
+    This implementation uses the power series coefficients of the Legendre
+    polynomials to evaluate them in a vectorized manner. The coefficients
+    are pre-calculated and cached via `_get_legendre_coeffs_and_deriv_coeffs`.
+    """
     x = torch.as_tensor(x)
-    device = x.device
     dtype = x.dtype
-    P = torch.zeros((max_order + 1,) + x.shape, dtype=dtype, device=device)
-    P_deriv = torch.zeros((max_order + 1,) + x.shape, dtype=dtype, device=device)
+    device = x.device
 
-    P[0] = torch.ones_like(x)
-    if max_order > 0:
-        P[1] = x
-        P_deriv[1] = torch.ones_like(x)
+    # Get the cached coefficients for the polynomials and their derivatives
+    poly_coeffs, deriv_coeffs = _get_legendre_coeffs_and_deriv_coeffs(max_order, device, dtype)
 
-    for n in range(1, max_order):
-        P[n+1] = ((2*n+1) * x * P[n] - n * P[n-1]) / (n+1)
-        P_deriv[n+1] = P_deriv[n-1] + (2*n+1) * P[n]
+    # Compute powers of x, i.e., [1, x, x^2, ..., x^max_order]
+    # Shape: [max_order + 1, *x.shape]
+    x_powers_flat = x.flatten().unsqueeze(0).pow(torch.arange(max_order + 1, device=device, dtype=dtype).unsqueeze(1))
+    x_powers = x_powers_flat.reshape((max_order + 1,) + x.shape)
+
+    # Evaluate the polynomials using the coefficients and powers of x
+    # P[n](x) = sum_k poly_coeffs[n, k] * x^k
+    P = torch.einsum("nk,k...->n...", poly_coeffs, x_powers)
+
+    # Evaluate the derivatives
+    P_deriv = torch.einsum("nk,k...->n...", deriv_coeffs, x_powers)
         
     return P, P_deriv
 
-def _get_legendre_coeffs(max_order, dtype, device):
-    coeffs = torch.zeros(max_order + 1, max_order + 1, dtype=dtype, device=device)
+@lru_cache(maxsize=None)
+def _get_legendre_coeffs(max_order):
+    coeffs = np.zeros((max_order + 1, max_order + 1))
     if max_order >= 0:
         coeffs[0, 0] = 1.0
     if max_order >= 1:
@@ -217,54 +249,70 @@ def _get_legendre_coeffs(max_order, dtype, device):
         coeffs[k+1, :] -= k/(k+1) * coeffs[k-1, :]
     return coeffs
 
+@lru_cache(maxsize=None)
+def _get_legendre_to_monomial_transformation(n_stages, device, dtype):
+    """
+    Computes the h-independent part of the transformation matrix from the
+    shifted Legendre basis to the monomial basis.
+
+    This function calculates a matrix `M` where `M[l, j]` is a component of the
+    coefficient for the `t^l` term in the expansion of `P_j(2*t/h - 1)`.
+    Specifically, the coefficient of `t^l` is `(2/h)^l * M[l, j]`.
+
+    The matrix is constructed such that its j-th column contains the coefficients
+    for the j-th basis function, which is a standard convention.
+    """
+    legendre_coeffs = _get_legendre_coeffs(n_stages - 1)
+    
+    # Pre-compute all possible combinations
+    l_idx, j_idx, m_idx = np.meshgrid(
+        np.arange(n_stages), np.arange(n_stages), np.arange(n_stages),
+        indexing='ij'
+    )
+    
+    # Create mask
+    mask = (m_idx >= l_idx) & (m_idx <= j_idx)
+    
+    # Compute terms
+    terms = np.where(mask,
+                    legendre_coeffs[j_idx, m_idx] * 
+                    scipy.special.comb(m_idx, l_idx) * 
+                    (-1.0) ** (m_idx - l_idx),
+                    0)
+    
+    # Sum over m dimension
+    M = np.sum(terms, axis=2)
+    return torch.from_numpy(M).to(device=device, dtype=dtype)
+
 def _compute_phi_to_power_coeffs_matrix(n_stages, h, dtype, device):
     """
     Computes the matrix of power series coefficients for the lifting basis functions phi_j(t).
-
-    Args:
-        n_stages: Number of collocation stages.
-        h: Step sizes, shape [*t_batch_shape].
-        dtype: Dtype for the tensors.
-        device: Device for the tensors.
-
-    Returns:
-        A tensor of shape [*t_batch_shape, n_stages, n_stages + 2] containing
-        the power series coefficients for each phi_j(t).
+    The returned tensor has shape [*t_batch_shape, n_coeffs, n_stages], where
+    phi_coeffs[..., k, j] is the coefficient of t^k for the basis function phi_j(t).
     """
     t_batch_shape = h.shape
     poly_degree = n_stages + 1
     n_coeffs = poly_degree + 1
 
-    legendre_coeffs = _get_legendre_coeffs(n_stages - 1, dtype, device)  # [n_stages, n_stages]
+    # Get the h-independent transformation matrix M.
+    # M[l, j] is the part of the t^l coefficient for the j-th basis function.
+    M = _get_legendre_to_monomial_transformation(n_stages, device, dtype)
 
     a = 2 / h
-    b = -1.0
+    a_powers = torch.pow(a.unsqueeze(-1), torch.arange(n_stages, device=device, dtype=dtype))
 
-    # Get power series coefficients for P_j(a*t + b)
-    # q_coeffs[..., j, l] is the coeff of t^l for P_j(a*t+b)
-    q_coeffs = torch.zeros(*t_batch_shape, n_stages, n_stages, dtype=dtype, device=device)
-
-    for j in range(n_stages):  # for each P_j
-        p_j_coeffs = legendre_coeffs[j, :j + 1]  # [j+1]
-        for m in range(j + 1):  # for each x^m term in P_j
-            if p_j_coeffs[m] == 0:
-                continue
-            # Compute coeffs of (a*t+b)^m
-            combs = torch.from_numpy(scipy.special.comb(m, torch.arange(m + 1))).to(dtype=dtype, device=device)
-            a_pow_l = torch.pow(a.unsqueeze(-1), torch.arange(m + 1, device=device, dtype=dtype))
-            b_pow_ml = torch.pow(b, torch.arange(m, -1, -1, device=device, dtype=dtype))
-            
-            term = p_j_coeffs[m] * combs * a_pow_l * b_pow_ml
-            q_coeffs[..., j, :m + 1] += term
+    # Compute q_coeffs. q_coeffs[..., l, j] is the coeff of t^l in P_j(a*t-1).
+    # This is M[l, j] * a_powers[..., l].
+    q_coeffs = M.view((1,) * len(t_batch_shape) + (n_stages, n_stages)) * a_powers.unsqueeze(-1)
 
     # Get power series for phi_j(t) = (t^2 - h*t) * P_j(tau(t))
-    # phi_coeffs[..., j, k] is the k-th power coeff for phi_j(t)
-    phi_coeffs = torch.zeros(*t_batch_shape, n_stages, n_coeffs, dtype=dtype, device=device)
-    
+    # phi_coeffs[..., k, j] is the k-th power coeff for phi_j(t)
+    phi_coeffs = torch.zeros(*t_batch_shape, n_coeffs, n_stages, dtype=dtype, device=device)
+
     # from t^2 * P_j
-    phi_coeffs[..., :, 2:] += q_coeffs
+    phi_coeffs[..., 2:, :] += q_coeffs
     # from -h*t * P_j
-    phi_coeffs[..., :, 1:-1] -= h.unsqueeze(-1).unsqueeze(-1) * q_coeffs
+    phi_coeffs[..., 1:-1, :] -= h.unsqueeze(-1).unsqueeze(-1) * q_coeffs
     
     return phi_coeffs
 
@@ -313,35 +361,46 @@ def _solve_collocation_system_lifting(y0, y1, h, t_nodes, A_nodes, g_nodes, n_st
     c = c_flat.reshape(*batch_shape, n_stages, dim)
 
     # --- 4. Fully Vectorized Coefficient Conversion ---
-    # The final polynomial is y(t) = y_0(t) + sum_{j=0}^{n_stages-1} c_j * phi_j(t)
-    # y(t) = y0 + (y1-y0)/h * t + sum_{j=0}^{n_stages-1} c_j * phi_j(t)
+    # Final polynomial: y(t) = y_0(t) + sum_{j=0}^{n_stages-1} c_j * phi_j(t)
+    # We represent this as a matrix-vector product. The "vector" is the coefficients
+    # in the lifting basis {1, t, phi_0, ...} and the matrix transforms them to the
+    # power basis {t^k}.
     
     poly_degree = n_stages + 1
     n_coeffs = poly_degree + 1
-    
-    # Get power series coefficients for all phi_j(t)
+
+    # Construct the conversion matrix T
+    # T has shape [*t_batch_shape, n_coeffs_out, n_coeffs_in]
+    # T[k, i] is the coeff of t^k in the i-th basis function.
+    # The basis is {1, t, phi_0, ..., phi_{s-1}}
+    T = torch.zeros(*h.shape, n_coeffs, n_coeffs, dtype=y0.dtype, device=y0.device)
+    T[..., 0, 0] = 1.0  # Basis func 1 -> 1 * t^0
+    T[..., 1, 1] = 1.0  # Basis func t -> 1 * t^1
+
+    # Basis funcs phi_j(t)
+    # phi_coeffs has shape [*t_batch_shape, n_coeffs, n_stages], where the (k,j) entry
+    # is the coefficient of t^k for basis function phi_j. This is exactly what we need
+    # for the columns of our transformation matrix T.
     phi_coeffs = _compute_phi_to_power_coeffs_matrix(n_stages, h, y0.dtype, y0.device)
-    # phi_coeffs shape: [*t_batch_shape, n_stages, n_coeffs]
-    
-    # Calculate the contribution from the sum term
-    # c shape: [*ode_batch, *t_batch, n_stages, dim]
-    # phi_coeffs needs to be broadcastable
+    T[..., :, 2:] = phi_coeffs
+
+    # Construct the coefficient vector in the lifting basis
+    # The coefficients are {y0, (y1-y0)/h, c_0, ...}
+    # C_lift shape: [*batch_shape, n_coeffs, dim]
+    C_lift = torch.cat([
+        y0.unsqueeze(-2),
+        ((y1 - y0) / h_).unsqueeze(-2),
+        c
+    ], dim=-2)
+
+    # Transform coefficients to the power basis using batched matrix multiplication
+    # T shape: [*t_batch, n_coeffs, n_coeffs]
+    # C_lift shape: [*ode_batch, *t_batch, n_coeffs, dim]
+    # We need to expand T to match the batch dimensions of C_lift
     ode_batch_rank = len(ode_batch_shape)
-    t_batch_rank = len(t_batch_shape)
-    
-    # Reshape c for broadcasting: [*ode, *t_batch, n_stages, 1, dim]
-    c_reshaped = c.unsqueeze(-2)
-    # Reshape phi_coeffs for broadcasting: [1...1, *t_batch, n_stages, n_coeffs, 1]
-    phi_coeffs_reshaped = phi_coeffs.view((1,) * ode_batch_rank + phi_coeffs.shape).unsqueeze(-1)
+    T_expanded = T.view((1,) * ode_batch_rank + T.shape)
 
-    # sum_coeffs shape: [*ode_batch, *t_batch, n_coeffs, dim]
-    sum_coeffs = (c_reshaped * phi_coeffs_reshaped).sum(dim=ode_batch_rank + t_batch_rank)
-
-    # Add coefficients from y_0(t)
-    final_coeffs = torch.zeros(*batch_shape, n_coeffs, dim, dtype=y0.dtype, device=y0.device)
-    final_coeffs[..., 0, :] = y0
-    final_coeffs[..., 1, :] = (y1 - y0) / h_
-    final_coeffs += sum_coeffs
+    final_coeffs = torch.matmul(T_expanded, C_lift)
 
     return final_coeffs
         
