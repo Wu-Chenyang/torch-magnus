@@ -213,7 +213,7 @@ def test_odeint_adjoint_nonhomogeneous_gradient():
     t_span = torch.linspace(0., 1., 5, dtype=torch.float64)
 
     # 2. Compute gradient using odeint_adjoint
-    y_final_adjoint = odeint_adjoint(system_func, y0, t_span, p)[-1]
+    y_final_adjoint = odeint_adjoint(system_func, y0, t_span, p, dense_output_method='naive')[-1]
     loss = y_final_adjoint.norm()
     loss.backward()
     grad_adjoint = p.grad.clone()

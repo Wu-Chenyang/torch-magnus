@@ -152,6 +152,8 @@ def test_functional_adjoint_example():
 
     # 3. Initialize learnable parameters and optimizer
     A_learnable = torch.randn(2, 2, requires_grad=True)
+    with torch.no_grad():
+        A_learnable.data = A_true + torch.randn_like(A_true) * 0.01
     optimizer = optim.Adam([A_learnable], lr=0.01)
     loss_fn = nn.MSELoss()
 

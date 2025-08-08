@@ -16,7 +16,7 @@ class TestMagnusAdjointForward:
         param_keys = []
         param_values = []
 
-        y_traj = _Adjoint.apply(y0, t, system_func, param_keys, 'magnus', 2, 1e-6, 1e-8, 'gk', None, *param_values)
+        y_traj = _Adjoint.apply(y0, t, system_func, param_keys, 'magnus', 2, 1e-6, 1e-8, 'gk', None, "collocation", *param_values)
         assert y_traj.shape == (3, 2)
         # Further assertions could check the actual values if a simple analytical solution is known
 
@@ -36,7 +36,7 @@ class TestMagnusAdjointForward:
         param_keys = []
         param_values = []
 
-        y_traj = _Adjoint.apply(y0, t, system_func, param_keys, 'magnus', 2, 1e-6, 1e-8, 'gk', None, *param_values)
+        y_traj = _Adjoint.apply(y0, t, system_func, param_keys, 'magnus', 2, 1e-6, 1e-8, 'gk', None, "collocation", *param_values)
         # For Magnus non-homogeneous, the output should be sliced back to original dimension
         assert y_traj.shape == (3, 2)
 
@@ -56,7 +56,7 @@ class TestMagnusAdjointForward:
         param_keys = []
         param_values = []
 
-        y_traj = _Adjoint.apply(y0, t, system_func, param_keys, 'glrk', 2, 1e-6, 1e-8, 'gk', None, *param_values)
+        y_traj = _Adjoint.apply(y0, t, system_func, param_keys, 'glrk', 2, 1e-6, 1e-8, 'gk', None, "collocation", *param_values)
         # For GLRK non-homogeneous, the output should NOT be sliced, as it operates on original dim
         assert y_traj.shape == (3, 2)
 
@@ -75,5 +75,5 @@ class TestMagnusAdjointForward:
         param_keys = ['p']
         param_values = [p]
 
-        y_traj = _Adjoint.apply(y0, t, system_func, param_keys, 'magnus', 2, 1e-6, 1e-8, 'gk', None, *param_values)
+        y_traj = _Adjoint.apply(y0, t, system_func, param_keys, 'magnus', 2, 1e-6, 1e-8, 'gk', None, 'collocation', *param_values)
         assert y_traj.shape == (3, 2)

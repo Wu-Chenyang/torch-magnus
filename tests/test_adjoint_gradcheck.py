@@ -4,7 +4,8 @@ from torch_linode.solvers import odeint_adjoint
 
 dtype = torch.float64
 @pytest.mark.parametrize("method", ['glrk', 'magnus'])
-def test_magnus_nonhomogeneous_gradcheck_simple(method):
+@pytest.mark.parametrize("dense_output_method", ['collocation', 'naive'])
+def test_magnus_nonhomogeneous_gradcheck_simple(method, dense_output_method):
     dim = 2
     y0 = torch.tensor([1.0, 2.0], dtype=dtype, requires_grad=True)
     t_span = torch.tensor([0.0, 1.0], dtype=dtype)
@@ -29,11 +30,11 @@ def test_magnus_nonhomogeneous_gradcheck_simple(method):
     def func_to_check(y0_in, params_in):
         # Pass the combined parameters tensor to odeint_adjoint
         # Note: The [0] slice was likely a bug, odeint_adjoint returns the full trajectory.
-        solution = odeint_adjoint(system_func, y0_in, t_span, params=params_in, method=method)
+        solution = odeint_adjoint(system_func, y0_in, t_span, params=params_in, method=method, dense_output_method=dense_output_method)
         return solution
 
     # gradcheck now correctly checks the function with respect to y0 and the combined params_tensor
     # We test the gradient of the final state
-    assert torch.autograd.gradcheck(lambda y, p: func_to_check(y, p)[-1], (y0, params_tensor), eps=1e-6, atol=1e-4)
+    assert torch.autograd.gradcheck(lambda y, p: func_to_check(y, p)[-1], (y0, params_tensor), eps=1e-6, atol=1e-5)
     print(f"Magnus non-homogeneous gradcheck (simple, {dtype}) passed.")
 

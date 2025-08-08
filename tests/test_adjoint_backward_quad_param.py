@@ -6,7 +6,7 @@ from typing import Callable
 from torch_linode import solvers
 
 class MockCtx:
-    def __init__(self, t, param_values, functional_system_func, param_keys, method, order, rtol, atol, quad_method, quad_options, is_nonhomogeneous, y_dense_traj_aug, y0_requires_grad):
+    def __init__(self, t, param_values, functional_system_func, param_keys, method, order, rtol, atol, quad_method, quad_options, is_nonhomogeneous, y_dense_traj_aug, y0_requires_grad, dense_output_method):
         self.saved_tensors = (t, *param_values)
         self.functional_system_func = functional_system_func
         self.param_keys = param_keys
@@ -19,6 +19,7 @@ class MockCtx:
         self.is_nonhomogeneous = is_nonhomogeneous
         self.y_dense_traj_aug = y_dense_traj_aug
         self.y0_requires_grad = y0_requires_grad
+        self.dense_output_method = dense_output_method
 
 def test_quad_integrator_is_nonhomogeneous_param():
     # Dummy data for non-homogeneous system
@@ -74,7 +75,8 @@ def test_quad_integrator_is_nonhomogeneous_param():
             quad_method='gk', quad_options={},
             is_nonhomogeneous=True,
             y_dense_traj_aug=y_dense_traj_aug,
-            y0_requires_grad=True
+            y0_requires_grad=True,
+            dense_output_method="collocation"
         )
         solvers._Adjoint.backward(ctx_gk, grad_y_traj)
         
@@ -104,7 +106,8 @@ def test_quad_integrator_is_nonhomogeneous_param():
             quad_method='simpson', quad_options={},
             is_nonhomogeneous=True,
             y_dense_traj_aug=y_dense_traj_aug,
-            y0_requires_grad=True
+            y0_requires_grad=True,
+            dense_output_method="collocation"
         )
         solvers._Adjoint.backward(ctx_simpson, grad_y_traj)
         

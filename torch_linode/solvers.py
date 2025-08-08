@@ -426,7 +426,7 @@ class _Adjoint(torch.autograd.Function):
     """Magnus integrator with memory-efficient adjoint gradient computation."""
     
     @staticmethod
-    def forward(ctx, y0, t, functional_system_func, param_keys, method, order, rtol, atol, quad_method, quad_options, *param_values):
+    def forward(ctx, y0, t, functional_system_func, param_keys, method, order, rtol, atol, quad_method, quad_options, dense_output_method, *param_values):
         # Reconstruct dictionary from unpacked arguments
         params_and_buffers_dict = dict(zip(param_keys, param_values))
         
@@ -471,11 +471,12 @@ class _Adjoint(torch.autograd.Function):
         with torch.no_grad():
             y_dense_traj = adaptive_ode_solve(
                 y_in, (t[0], t[-1]), solver_func, params_and_buffers_dict, 
-                method=method, order=order, rtol=rtol, atol=atol, dense_output=True
+                method=method, order=order, rtol=rtol, atol=atol, dense_output=True, dense_output_method=dense_output_method
             )
             y_traj_maybe_aug = y_dense_traj(t)
 
         # --- Save context for backward pass ---
+        ctx.dense_output_method = dense_output_method
         ctx.is_nonhomogeneous = is_nonhomogeneous
         ctx.functional_system_func = functional_system_func # Save original user func
         ctx.param_keys = param_keys
@@ -537,7 +538,7 @@ class _Adjoint(torch.autograd.Function):
             with torch.no_grad():
                 a_dense_traj = adaptive_ode_solve(
                     adj_y, (t_i, t_prev), neg_trans_A_func, full_p_dict_for_solve, 
-                    method=method, order=order, rtol=rtol, atol=atol, dense_output=True
+                    method=method, order=order, rtol=rtol, atol=atol, dense_output=True, dense_output_method=ctx.dense_output_method
                 )
 
             # --- Define VJP target and cotangents for quadrature ---
@@ -573,7 +574,7 @@ class _Adjoint(torch.autograd.Function):
         
         grad_param_values = tuple(adj_params.get(key) for key in param_keys)
 
-        return (grad_y0, None, None, None, None, None, None, None, None, None, *grad_param_values)
+        return (grad_y0, None, None, None, None, None, None, None, None, None, None, *grad_param_values)
 
 # -----------------------------------------------------------------------------
 # User-Friendly Interface
@@ -583,7 +584,7 @@ def odeint_adjoint(
     system_func_or_module: Union[Callable, nn.Module], y0: Tensor, t: Union[Sequence[float], torch.Tensor],
     params: Tensor = None,
     method: str = 'magnus', order: int = 4, rtol: float = 1e-6, atol: float = 1e-8,
-    quad_method: str = 'gk', quad_options: dict = None
+    quad_method: str = 'gk', quad_options: dict = None, dense_output_method: str = 'collocation_precompute'
 ) -> Tensor:
     """
     Solve linear ODE system with memory-efficient adjoint gradient computation.
@@ -605,6 +606,7 @@ def odeint_adjoint(
         atol: Absolute tolerance for integration.
         quad_method: Quadrature method for adjoint integration ('gk' or 'simpson').
         quad_options: Options dictionary for quadrature method.
+        dense_output_method: Method for dense output ('collocation_precompute', 'collocation_ondemand', 'naive').
         
     Returns:
         Solution trajectory of shape (*batch_shape, N, dim).
@@ -628,6 +630,6 @@ def odeint_adjoint(
         y0, t_vec, 
         functional_system_func, 
         param_keys, method, order, rtol, atol, 
-        quad_method, quad_options,
+        quad_method, quad_options, dense_output_method,
         *param_values  # unpack the tensors here
     )

@@ -10,7 +10,8 @@ import pytest
 
 @pytest.mark.parametrize("method", ["magnus", "glrk"])
 @pytest.mark.parametrize("order", [2, 4, 6])
-def test_exponential_system(method, order):
+@pytest.mark.parametrize("dense_output_method", ["collocation", "naive"])
+def test_exponential_system(method, order, dense_output_method):
     """测试指数系统: y' = diag(p1, p2) * y"""
     
     def A_func(t, params: torch.Tensor) -> torch.Tensor:
@@ -27,16 +28,19 @@ def test_exponential_system(method, order):
     y0 = torch.tensor([1.0, 2.0], dtype=torch.float64)
     T = 1.0
     t = torch.tensor([0.0, T], dtype=torch.float64)
+
+    # 解析解: y(T) = [exp(p1*T), 2*exp(p2*T)]
+    def analytical_sol(t):
+        return torch.tensor([
+            math.exp(p1 * t),
+            2 * math.exp(p2 * t)
+        ], dtype=torch.float64)
     
     # Magnus求解
-    y_traj = odeint_adjoint(A_func, y0, t, params, method=method, order=order, rtol=1e-6, atol=1e-8)
+    y_traj = odeint_adjoint(A_func, y0, t, params, method=method, order=order, rtol=1e-6, atol=1e-8, dense_output_method=dense_output_method)
     
-    # 解析解: y(T) = [exp(p1*T), 2*exp(p2*T)]
-    y_analytical = torch.tensor([
-        math.exp(p1 * T),
-        2 * math.exp(p2 * T)
-    ], dtype=torch.float64)
-    
+    y_analytical = analytical_sol(T)
+
     print(f"  {method} solution: {y_traj[-1].detach().numpy()}")
     print(f"  Analytical solution: {y_analytical.numpy()}")
     print(f"  Solution error: {torch.norm(y_traj[-1] - y_analytical).item():.2e}")
@@ -57,7 +61,8 @@ def test_exponential_system(method, order):
     grad_error = torch.norm(grad_magnus - grad_analytical)
     print(f"  Gradient error: {grad_error.item():.2e}")
     
-    success = grad_error < 1e-8 + 1e-6 * torch.norm(grad_analytical)
+    threshold = 1e-8 + 1e-6 * torch.norm(grad_analytical)
+    success = grad_error < threshold
     print(f"  Test: {'PASSED' if success else 'FAILED'}")
     
     assert success
@@ -65,7 +70,8 @@ def test_exponential_system(method, order):
 
 @pytest.mark.parametrize("method", ["magnus", "glrk"])
 @pytest.mark.parametrize("order", [2, 4, 6])
-def test_harmonic_oscillator(method, order):
+@pytest.mark.parametrize("dense_output_method", ["collocation", "naive"])
+def test_harmonic_oscillator(method, order, dense_output_method):
     """测试谐振子: y'' + ω²y = 0 """
     
     def A_func(t, params: torch.Tensor) -> torch.Tensor:
@@ -84,14 +90,17 @@ def test_harmonic_oscillator(method, order):
     T = 0.5
     t = torch.tensor([0.0, T], dtype=torch.float64)
     
+    # 解析解: y(T) = [cos(ωT), -ω*sin(ωT)]
+    def analytical_sol(t):
+        return torch.tensor([
+            math.cos(omega * t),
+            -omega * math.sin(omega * t)
+        ], dtype=torch.float64)
+
     # Magnus求解
-    y_traj = odeint_adjoint(A_func, y0, t, params, method=method, order=order, rtol=1e-6, atol=1e-8)
+    y_traj = odeint_adjoint(A_func, y0, t, params, method=method, order=order, rtol=1e-6, atol=1e-8, dense_output_method=dense_output_method)
     
-        # 解析解: y(T) = [cos(ωT), -ω*sin(ωT)]
-    y_analytical = torch.tensor([
-        math.cos(omega * T),
-        -omega * math.sin(omega * T)
-    ], dtype=torch.float64)
+    y_analytical = analytical_sol(T)
     
     print(f"  {method} solution: {y_traj[-1].detach().numpy()}")
     print(f"  Analytical solution: {y_analytical.numpy()}")
@@ -134,7 +143,8 @@ def test_harmonic_oscillator(method, order):
 
 @pytest.mark.parametrize("method", ["magnus", "glrk"])
 @pytest.mark.parametrize("order", [2, 4, 6])
-def test_rotation_matrix(method, order):
+@pytest.mark.parametrize("dense_output_method", ["collocation", "naive"])
+def test_rotation_matrix(method, order, dense_output_method):
     """测试旋转矩阵: A = [[0, ω], [-ω, 0]]"""
     
     def A_func(t, params: torch.Tensor) -> torch.Tensor:
@@ -154,7 +164,7 @@ def test_rotation_matrix(method, order):
     t = torch.tensor([0.0, T], dtype=torch.float64)
     
     # Magnus求解
-    y_traj = odeint_adjoint(A_func, y0, t, params, method=method, order=order, rtol=1e-6, atol=1e-8)
+    y_traj = odeint_adjoint(A_func, y0, t, params, method=method, order=order, rtol=1e-6, atol=1e-8, dense_output_method=dense_output_method)
     
     # 解析解: y(T) = [cos(ωT), -sin(ωT)]
     y_analytical = torch.tensor([
@@ -187,7 +197,8 @@ def test_rotation_matrix(method, order):
 
 @pytest.mark.parametrize("method", ["magnus", "glrk"])
 @pytest.mark.parametrize("order", [2, 4, 6])
-def test_challenging_highly_oscillatory_system(method, order):
+@pytest.mark.parametrize("dense_output_method", ["collocation", "naive"])
+def test_challenging_highly_oscillatory_system(method, order, dense_output_method):
     """测试一个具有非零梯度的挑战性高度振荡系统"""
     
     def A_func(t, params: torch.Tensor) -> torch.Tensor:
@@ -211,7 +222,7 @@ def test_challenging_highly_oscillatory_system(method, order):
     t = torch.tensor([0.0, T], dtype=torch.float64)
 
     # Magnus求解
-    y_traj = odeint_adjoint(A_func, y0, t, params, method=method, order=order, rtol=1e-6, atol=1e-8)
+    y_traj = odeint_adjoint(A_func, y0, t, params, method=method, order=order, rtol=1e-6, atol=1e-8, dense_output_method=dense_output_method)
 
     # 解析解
     if w2 == 0:
@@ -266,7 +277,8 @@ def test_challenging_highly_oscillatory_system(method, order):
 
 @pytest.mark.parametrize("method", ["magnus", "glrk"])
 @pytest.mark.parametrize("order", [2, 4, 6])
-def test_against_torchdiffeq(method, order):
+@pytest.mark.parametrize("dense_output_method", ["collocation", "naive"])
+def test_against_torchdiffeq(method, order, dense_output_method):
     """与torchdiffeq比较(如果可用)"""
     
     try:
@@ -302,7 +314,7 @@ def test_against_torchdiffeq(method, order):
             return A
         
         params_magnus = params.clone().detach().requires_grad_(True)
-        y_magnus = odeint_adjoint(A_func, y0, t, params_magnus, method=method, order=order, rtol=1e-6, atol=1e-8)
+        y_magnus = odeint_adjoint(A_func, y0, t, params_magnus, method=method, order=order, rtol=1e-6, atol=1e-8, dense_output_method=dense_output_method)
         loss_magnus = torch.sum(y_magnus[-1]**2)
         grad_magnus = torch.autograd.grad(loss_magnus, params_magnus)[0]
         

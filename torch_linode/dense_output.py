@@ -346,7 +346,7 @@ def _solve_collocation_system_lifting(y0, y1, h, t_nodes, A_nodes, g_nodes, n_st
     permute_dims = list(range(len(ode_batch_shape))) + [len(ode_batch_shape) + i + 1 for i in range(len(t_batch_shape))] + [len(ode_batch_shape)] + list(range(A_nodes.dim() - 2, A_nodes.dim()))
     A_nodes_T = A_nodes.permute(*permute_dims)
     
-    M = phi_deriv.unsqueeze(-1).unsqueeze(-1) * eye - phi.unsqueeze(-1).unsqueeze(-1) * A_nodes_T.unsqueeze(2)
+    M = phi_deriv.unsqueeze(-1).unsqueeze(-1) * eye - phi.unsqueeze(-1).unsqueeze(-1) * A_nodes_T.unsqueeze(-3)
     M = M.transpose(-2, -3).reshape(*batch_shape, n_stages * dim, n_stages * dim)
 
     y0_at_nodes = y0.unsqueeze(-2) + (y1 - y0).unsqueeze(-2) * (t_nodes / h).permute(*range(1, t_nodes.dim()), 0).unsqueeze(-1)
