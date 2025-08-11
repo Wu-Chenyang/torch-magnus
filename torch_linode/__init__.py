@@ -12,7 +12,7 @@ Available Functions:
 - adaptive_ode_solve: A lower-level solver for adaptive-step integration over a single interval.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 from .solvers import (
     odeint,
