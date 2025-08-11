@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from .butcher import GL2, GL4, GL6
 from .stepper import Collocation, Magnus2nd, Magnus4th, Magnus6th
-from .quadrature import GaussLegendreQuadrature
+from .quadrature import GaussLegendreQuadrature, AdaptiveGaussKronrod
 from .utils import _apply_matrix
 from .dense_output import CollocationDenseOutput, DenseOutputNaive, _merge_collocation_dense_outputs, _merge_naive_dense_outputs
 
@@ -239,7 +239,7 @@ def adaptive_ode_solve(
                 t_nodes_out = torch.stack(t_nodes_traj, dim=-1)
                 A_nodes_out = torch.stack(A_nodes_traj, dim=-3)
                 g_nodes_out = torch.stack(g_nodes_traj, dim=-2) if g_nodes_traj[0] is not None else None
-                dense_sol = CollocationDenseOutput(ts_out, ys_out, t_nodes_out, A_nodes_out, g_nodes_out, order, dense_mode=dense_mode)
+                dense_sol = CollocationDenseOutput(ts_out, ys_out, t_nodes_out, A_nodes_out, g_nodes_out, order+2, dense_mode=dense_mode)
             else:
                 dense_sol = DenseOutputNaive(ts_out, ys_out, order, A_func_bound, method)
 
@@ -480,6 +480,8 @@ class _Adjoint(torch.autograd.Function):
         # --- Prepare for backward integration ---
         if quad_method == 'gl': # Gauss-Legendre
             quad_integrator = GaussLegendreQuadrature(**quad_options)
+        elif quad_method == 'gk': # Gauss-Kronrod
+            quad_integrator = AdaptiveGaussKronrod(**quad_options)
         else:
             raise ValueError(f"Unknown or unsupported quadrature method: {quad_method}")
 
@@ -501,7 +503,7 @@ class _Adjoint(torch.autograd.Function):
 
             # --- Quadrature step ---
             integral_val_dict = quad_integrator(
-                functional_system_func, a_dense_segment, y_dense_traj, (t_i, t_prev), params_req, buffers_dict, atol, rtol
+                functional_system_func, a_dense_segment, y_dense_traj, params_req, buffers_dict, atol, rtol
             )
             
             for k in adj_params:
@@ -527,7 +529,7 @@ def odeint_adjoint(
     system_func_or_module: Union[Callable, nn.Module], y0: Tensor, t: Union[Sequence[float], torch.Tensor],
     params: Tensor = None,
     method: str = 'magnus', order: int = 4, rtol: float = 1e-6, atol: float = 1e-8,
-    quad_method: str = 'gl', quad_options: dict = None, dense_output_method: str = 'collocation_precompute'
+    quad_method: str = 'gk', quad_options: dict = None, dense_output_method: str = 'collocation_precompute'
 ) -> Tensor:
     """
     Solve linear ODE system with memory-efficient adjoint gradient computation.

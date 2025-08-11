@@ -65,12 +65,7 @@ class TestMagnusSolver(unittest.TestCase):
         A_base = torch.tensor([[0., 1.], [-1., 0.]])
         def A_func(t, params=None):
             A_dev = A_base.to(t.device if isinstance(t, torch.Tensor) else y0.device)
-            if isinstance(t, float) or t.ndim == 0:
-                return A_dev.unsqueeze(0).expand(*batch_shape, -1, -1)
-            elif t.ndim == 1:
-                return A_dev.unsqueeze(0).unsqueeze(0).expand(*batch_shape, t.shape[0], -1, -1)
-            else:
-                raise ValueError(f"Unsupported time shape: {t.shape}")
+            return A_dev.expand(*batch_shape, *t.shape, -1, -1)
 
         y_analytical_single = torch.stack([torch.cos(t_span), -torch.sin(t_span)], dim=-1)
         y_analytical = y_analytical_single.unsqueeze(0).expand(*batch_shape, -1, -1)
@@ -101,20 +96,7 @@ class TestMagnusSolver(unittest.TestCase):
         A_target_base = torch.tensor([[0., true_w], [-true_w, 0.]])
         def A_target_func(t, p=None):
             A_target_dev = A_target_base.to(t.device if isinstance(t, torch.Tensor) else y0.device)
-            if batch_shape: # Only apply unsqueeze and expand if batch_shape is not empty
-                if isinstance(t, float) or t.ndim == 0:
-                    return A_target_dev.unsqueeze(0).expand(*batch_shape, -1, -1)
-                elif t.ndim == 1:
-                    return A_target_dev.unsqueeze(0).unsqueeze(0).expand(*batch_shape, t.shape[0], -1, -1)
-                else:
-                    raise ValueError(f"Unsupported time shape for A_target_func: {t.shape}")
-            else: # If batch_shape is empty, return directly or unsqueeze for time dim if t is a vector
-                if isinstance(t, float) or t.ndim == 0:
-                    return A_target_dev
-                elif t.ndim == 1:
-                    return A_target_dev.unsqueeze(0).expand(t.shape[0], -1, -1)
-                else:
-                    raise ValueError(f"Unsupported time shape for A_target_func: {t.shape}")
+            return A_target_dev.expand(*batch_shape, *t.shape, -1, -1)
         
         with torch.no_grad():
             y_target = odeint(A_target_func, y0, t_span)
@@ -128,20 +110,7 @@ class TestMagnusSolver(unittest.TestCase):
                 torch.stack([-params, torch.tensor(0., device=y0.device)])
             ])
 
-            if batch_shape: # Only apply unsqueeze and expand if batch_shape is not empty
-                if isinstance(t, float) or t.ndim == 0:
-                    return A_matrix.unsqueeze(0).expand(*batch_shape, -1, -1)
-                elif t.ndim == 1:
-                    return A_matrix.unsqueeze(0).unsqueeze(0).expand(*batch_shape, t.shape[0], -1, -1)
-                else:
-                    raise ValueError(f"Unsupported time shape for A_learnable_func: {t.shape}")
-            else: # If batch_shape is empty, return directly or unsqueeze for time dim if t is a vector
-                if isinstance(t, float) or t.ndim == 0:
-                    return A_matrix
-                elif t.ndim == 1:
-                    return A_matrix.unsqueeze(0).expand(t.shape[0], -1, -1)
-                else:
-                    raise ValueError(f"Unsupported time shape for A_learnable_func: {t.shape}")
+            return A_matrix.expand(*batch_shape, *t.shape, -1, -1)
 
         num_iterations = 100 
         for i in range(num_iterations):
@@ -167,12 +136,7 @@ class TestMagnusSolver(unittest.TestCase):
 
         def A_func_batch(t, params=None):
             A_dev = A_base.to(t.device if isinstance(t, torch.Tensor) else y0_batch.device)
-            if isinstance(t, float) or t.ndim == 0:
-                return A_dev.unsqueeze(0).expand(batch_size, -1, -1)
-            elif t.ndim == 1:
-                return A_dev.unsqueeze(0).unsqueeze(0).expand(batch_size, t.shape[0], -1, -1)
-            else:
-                raise ValueError(f"Unsupported time shape: {t.shape}")
+            return A_dev.expand(batch_size, *t.shape, -1, -1)
 
         traj_batch, _ = adaptive_ode_solve(y0_batch, t_span_solve, A_func_batch, {}, order=4, return_traj=True)
         steps_batch = len(traj_batch)
@@ -182,12 +146,7 @@ class TestMagnusSolver(unittest.TestCase):
             y0_individual = y0_batch[i]
             def A_func_individual(t, params=None):
                 A_dev = A_base.to(t.device if isinstance(t, torch.Tensor) else y0_individual.device)
-                if isinstance(t, float) or t.ndim == 0:
-                    return A_dev
-                elif t.ndim == 1:
-                    return A_dev.unsqueeze(0).expand(t.shape[0], -1, -1)
-                else:
-                    raise ValueError(f"Unsupported time shape: {t.shape}")
+                return A_dev.expand(*t.shape, -1, -1)
             
             traj_individual, _ = adaptive_ode_solve(y0_individual, t_span_solve, A_func_individual, {}, order=4, return_traj=True)
             total_steps_individual += len(traj_individual)

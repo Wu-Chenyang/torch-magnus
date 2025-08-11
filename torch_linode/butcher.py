@@ -178,3 +178,25 @@ RADAU6 = ButcherTableau(
     c=torch.tensor([(4 - math.sqrt(6)) / 10, 1 / 2, (4 + math.sqrt(6)) / 10], dtype=torch.float64),
     order=5
 )
+
+# Gauss-Kronrod 15-point rule
+_GK15_NODES_RAW = [-0.99145537112081263920685469752598, -0.94910791234275852452618968404809, -0.86486442335976907278971278864098, -0.7415311855993944398638647732811, -0.58608723546769113029414483825842, -0.40584515137739716690660641207707, -0.20778495500789846760068940377309, 0.0]
+_GK15_WEIGHTS_K_RAW = [0.022935322010529224963732008059913, 0.063092092629978553290700663189093, 0.10479001032225018383987632254189, 0.14065325971552591874518959051021, 0.16900472663926790282658342659795, 0.19035057806478540991325640242055, 0.20443294007529889241416199923466, 0.20948214108472782801299917489173]
+_GK15_WEIGHTS_G_RAW = [0.12948496616886969327061143267787, 0.2797053914892766679014677714229, 0.38183005050511894495036977548818, 0.41795918367346938775510204081658]
+
+_nodes_neg = torch.tensor(_GK15_NODES_RAW, dtype=torch.float64)
+_nodes = torch.cat([-torch.flip(_nodes_neg[0:-1], dims=[0]), _nodes_neg])
+_weights_k_half = torch.tensor(_GK15_WEIGHTS_K_RAW, dtype=torch.float64)
+_weights_k = torch.cat([torch.flip(_weights_k_half[0:-1], dims=[0]), _weights_k_half])
+_weights_g_half = torch.tensor(_GK15_WEIGHTS_G_RAW, dtype=torch.float64)
+_weights_g_embedded = torch.cat([torch.flip(_weights_g_half, dims=[0]), _weights_g_half[1:]])
+_weights_g = torch.zeros_like(_weights_k)
+_weights_g[1::2] = _weights_g_embedded
+
+GK15 = ButcherTableau(
+    c=(_nodes + 1) / 2,
+    b=_weights_k / 2,
+    a=torch.zeros((15, 15), dtype=torch.float64), # Not used for quadrature
+    order=15, # Order of the Kronrod rule
+    b_error=(_weights_k - _weights_g) / 2
+)
