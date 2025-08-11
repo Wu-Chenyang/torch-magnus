@@ -114,8 +114,8 @@ def test_functional_adjoint_example():
 
     A_learnable = torch.randn(2, 2, requires_grad=True)
     with torch.no_grad():
-        A_learnable.data = A_true + torch.randn_like(A_true) * 0.01
-    optimizer = optim.Adam([A_learnable], lr=0.01)
+        A_learnable.data = A_true + torch.randn_like(A_true) * 0.1
+    optimizer = optim.Adam([A_learnable], lr=0.03)
     loss_fn = nn.MSELoss()
 
     initial_loss = loss_fn(odeint_adjoint(functional_system, y0, t_span, params=A_learnable), y_true)
@@ -165,3 +165,31 @@ def test_readme_non_homogeneous_example():
         plt.close()
     except Exception as e:
         assert False, f"Visualization code failed with error: {e}"
+
+# --- Test for the Dense Output with Batched Time Example ---
+def test_dense_output_batched_time_example():
+    """Tests the Dense Output with Batched Time example from the README."""
+    # 1. Define a batched, time-independent system
+    # A is a batch of 2 matrices
+    A = torch.randn(2, 2, 2)
+    def system_func(t, params):
+        A_batched = params
+        if hasattr(t, 'ndim') and t.ndim > 0:
+            return A_batched.unsqueeze(-3).expand(A_batched.shape[:-2] + (t.shape[-1],) + A_batched.shape[-2:])
+        return A_batched
+
+    # y0 has a batch shape of (2,)
+    y0 = torch.randn(2, 2)
+    t_span = torch.linspace(0, 5, 10)
+
+    # 2. Solve the ODE to get a dense output object
+    solution = odeint(system_func, y0, t_span, params=A, dense_output=True)
+
+    # 3. Evaluate on a batch of time points
+    t_eval = torch.linspace(0, 5, 20).reshape(2, 10)
+
+    # Get the interpolated solution
+    y_interpolated = solution(t_eval)
+
+    # Assert the output shape is correct
+    assert y_interpolated.shape == (2, 10, 2)

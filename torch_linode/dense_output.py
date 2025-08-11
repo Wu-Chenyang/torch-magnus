@@ -54,24 +54,40 @@ class DenseOutputNaive:
         step from the nearest previous time grid point.
         
         Args:
-            t_batch: Time points of shape (*time_shape,)
+            t_batch: Time points of shape (*batch_shape, *t_shape) or (*t_shape)
             
         Returns:
-            Solution tensor of shape (*batch_shape, *time_shape, dim)
+            Solution tensor of shape (*batch_shape, *t_shape, dim)
         """
-        # Find the interval each t_batch point falls into
-        indices = torch.searchsorted(self.ts, t_batch, right=True) - 1
+        t_batch = torch.as_tensor(t_batch, dtype=self.ts.dtype, device=self.ts.device)
+        # 1. Disentangle batch and time dimensions from t_batch
+        ode_batch_shape = self.ys.shape[:-2]
         
-        # Get the starting points (t0, y0) for each interpolation
+        was_scalar = (t_batch.ndim == 0)
+        if was_scalar:
+            t_batch = t_batch.unsqueeze(0)
+
+        # Let's assume last dim is time
+        t_time_shape = t_batch.shape[-1:]
+
+        t_batch_broadcasted = t_batch.broadcast_to(*ode_batch_shape, *t_time_shape)
+
+        # Find intervals
+        indices = torch.searchsorted(self.ts, t_batch_broadcasted, right=True) - 1
+        
+        # Get start points t0, y0
         t0 = self.ts[indices]
-        y0 = self.ys[..., indices, :]
+        y0 = torch.gather(self.ys, -2, indices.unsqueeze(-1).expand(*indices.shape, self.ys.shape[-1]))
+        
+        # Calculate step size
+        h_new = t_batch_broadcasted - t0
 
-        # Calculate the new step size h_new for each point
-        h_new = t_batch - t0
-
-        # Perform a single integration step for each point
+        # 4. Perform integration
         y_interp = self.integrator(self.A_func, t0, h_new, y0)
         
+        if was_scalar:
+            y_interp = y_interp.squeeze(-2)
+
         return y_interp
 
 class CollocationDenseOutput:
@@ -139,17 +155,30 @@ class CollocationDenseOutput:
         Evaluate solution at given time points using pre-computed data.
         """
         t_batch = torch.as_tensor(t_batch, dtype=self.ts.dtype, device=self.ts.device)
-        indices = torch.searchsorted(self.ts, t_batch, right=True) - 1
+
+        # 1. Disentangle batch and time dimensions from t_batch
+        ode_batch_shape = self.P.shape[:-3]
+        
+        was_scalar = (t_batch.ndim == 0)
+        if was_scalar:
+            t_batch = t_batch.unsqueeze(0)
+
+        # Let's assume last dim is time
+        t_time_shape = t_batch.shape[-1:]
+
+        # 2. Broadcast batch shapes
+
+        t_batch_broadcasted = t_batch.broadcast_to(*ode_batch_shape, *t_time_shape)
+
+        indices = torch.searchsorted(self.ts, t_batch_broadcasted, right=True) - 1
         indices = torch.clamp(indices, max=len(self.ts) - 2)
 
-        ode_batch_shape = self.P.shape[:-3]
-        t_batch_shape = indices.shape
         dim = self.P.shape[-1]
         n_coeffs = self.P.shape[-2]
         n_stages = n_coeffs - 2
 
         if self.dense_mode == 'ondemand':
-            unique_indices = torch.unique(indices)
+            unique_indices = torch.unique(indices.view(-1))
             not_avail_indices = unique_indices[~self.P_available[unique_indices]]
             if not_avail_indices.numel():
                 t0 = self.ts[not_avail_indices]
@@ -162,12 +191,12 @@ class CollocationDenseOutput:
 
                 if self.interpolation_method == 'power':
                     coeffs = _solve_collocation_system(
-                        y0, y1, h, t_nodes, A_nodes, g_nodes, n_stages, dim, 
+                        y0, y1, h, t_nodes, A_nodes, g_nodes, n_stages, dim,
                         ode_batch_shape, not_avail_indices.shape
                     )
                 elif self.interpolation_method == 'lifting':
                     coeffs = _solve_collocation_system_lifting(
-                        y0, y1, h, t_nodes, A_nodes, g_nodes, n_stages, dim, 
+                        y0, y1, h, t_nodes, A_nodes, g_nodes, n_stages, dim,
                         ode_batch_shape, not_avail_indices.shape
                     )
                 else:
@@ -175,17 +204,20 @@ class CollocationDenseOutput:
 
                 self.P[..., not_avail_indices, :, :] = coeffs
                 self.P_available[not_avail_indices] = True
-            
-        C = self.P[..., indices, :, :]
-        t0 = self.ts[indices]
+        
+        # 3. Use torch.gather to safely get coefficients C
+        C = torch.gather(self.P, -3, indices.unsqueeze(-1).unsqueeze(-1).expand(indices.shape + self.P.shape[-2:]))
 
-        # Evaluate the polynomial with the computed coefficients
-        # t_eval should be broadcastable to batch_shape
-        t_eval = t_batch - t0
+        # 4. Evaluate the polynomial with the computed coefficients
+        t0 = self.ts[indices]
+        t_eval = t_batch_broadcasted - t0
         powers = torch.arange(n_coeffs, device=t_eval.device, dtype=t_eval.dtype)
-        t_powers = torch.pow(t_eval.unsqueeze(-1), powers).unsqueeze(-1)  # [..., time, n_coeffs, 1]
-        y_interp = torch.sum(C * t_powers, dim=-2)  # [..., time, dim]
+        t_powers = torch.pow(t_eval.unsqueeze(-1), powers).unsqueeze(-1)
+        y_interp = torch.sum(C * t_powers, dim=-2)
             
+        if was_scalar:
+            y_interp = y_interp.squeeze(-2)
+
         return y_interp
 
 @lru_cache(maxsize=None)

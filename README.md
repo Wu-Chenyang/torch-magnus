@@ -18,6 +18,7 @@ Leveraging high-order integrators and a memory-efficient adjoint method for back
 - **High-Order Integrators**: Includes 2nd, 4th, and 6th-order Magnus integrators and a generic `Collocation` solver (e.g., Gauss-Legendre).
 - **Fully Differentiable**: Gradients can be backpropagated through the solvers, making it ideal for training.
 - **Dense Output**: Provides continuous solutions for evaluation at any time point.
+- **Batched Dense Output**: The `DenseOutput` object supports evaluation at a batch of time points. The batch shape of the time tensor must match the batch shape of the solved system.
 - **GPU Support**: Runs seamlessly on CUDA-enabled devices.
 
 ## Installation
@@ -225,6 +226,7 @@ plt.ylabel("State")
 plt.legend()
 plt.grid(True)
 plt.show()
+
 ```
 
 ## API Reference
@@ -254,6 +256,58 @@ These arguments are used to control the backward pass in the adjoint method.
 | -------------- | ------ | ------- | -------------------------------------------------------------------------------------------------------- |
 | `quad_method`  | `str`  | `'gk'`  | The quadrature method for adjoint integration: `'gk'` (Gauss-Kronrod) or `'simpson'` (Simpson's rule). |
 | `quad_options` | `dict` | `None`  | Optional dictionary of settings for the chosen `quad_method`.                                            |
+
+## Usage Example: Dense Output with Batched Time
+
+When `dense_output=True` is passed to `odeint`, it returns a solution object that can be evaluated at any time point. This evaluation can also be batched.
+
+A key requirement is that the batch shape of the evaluation time tensor `t_eval` must **exactly match** the batch shape of the solved ODE system. Broadcasting between different batch shapes is not supported for dense output evaluation.
+
+The output shape will be `(*batch_shape, *t_shape, dim)`.
+
+```python
+import torch
+from torch_linode import odeint
+
+# 1. Define a batched, time-independent system
+# A has a batch shape of (2,)
+A = torch.randn(2, 2, 2)
+def system_func(t, params):
+    # This simple function ignores t and returns the batched matrix.
+    # The solver expects the A matrix to have a time dimension for internal
+    # quadrature, so we expand it to match t's shape.
+    A_batched = params
+    if hasattr(t, 'ndim') and t.ndim > 0:
+        # Add a dummy time dimension for expansion
+        A_expanded = A_batched.unsqueeze(-3)
+        # Expand to match the time dimension of t
+        return A_expanded.expand(A_expanded.shape[:-3] + (t.shape[-1],) + A_expanded.shape[-2:])
+    return A_batched
+
+# y0 also has a batch shape of (2,)
+y0 = torch.randn(2, 2)
+t_span = torch.linspace(0, 5, 10)
+
+# 2. Solve the ODE to get a dense output object
+solution = odeint(system_func, y0, t_span, params=A, dense_output=True)
+
+# 3. Evaluate on a batch of time points
+# t_eval's batch shape (2,) must match the ODE's batch shape (2,).
+# Create a t_eval with shape (2, 10)
+t_eval = torch.linspace(0, 5, 20).reshape(2, 10)
+
+# Get the interpolated solution
+y_interpolated = solution(t_eval)
+
+print(f"ODE batch shape: {A.shape[:-2]}")
+print(f"Time evaluation shape: {t_eval.shape}")
+print(f"Interpolated output shape: {y_interpolated.shape}")
+# Expected output shape: (2, 10, 2)
+```
+
+**Important Note on `system_func` for Batched Evaluation:**
+
+When using either `naive` or `collocation` dense output, the underlying `system_func` will be called with a time tensor `t` that contains the batch dimensions from the evaluation times. Your `system_func` **must** be implemented to correctly handle this and return an `A(t)` matrix with a compatible shape (i.e., it must also include the time dimension).
 
 ## Running Tests
 
